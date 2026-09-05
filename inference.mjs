@@ -82,7 +82,11 @@ function buildServerArgv(name, m) {
   const argv = ["llama-server", "--alias", String(serverAlias), "-m", expand(m.model)];
   if (m.mmproj) argv.push("--mmproj", expand(m.mmproj));
   if (m.draft) argv.push("-md", expand(m.draft));
-  for (const a of m.args ?? []) argv.push(String(a));
+  // args accepts bare "flag" items and [flag, value] pairs (one pair per line)
+  for (const a of m.args ?? []) {
+    if (Array.isArray(a)) for (const x of a) argv.push(String(x));
+    else argv.push(String(a));
+  }
   return { serverAlias, argv };
 }
 
