@@ -152,3 +152,4 @@ models:
       - [-np, 1]
       - [--flash-attn, "on"]
       - --no-mmap
+last_profile: qwen3.8-27b-nvfp4-mtp-q8attn
