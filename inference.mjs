@@ -1,17 +1,19 @@
 #!/usr/bin/env bun
-// inference.mjs — launch a llama-server profile in its own Ghostty window.
+// inference.mjs — launch a llama-server profile via the configured launcher
+// backend (a Ghostty window, or a floating pane in the current zellij session).
 //
 // Usage:
-//   ~/inference.mjs <profile> [--dry-run]   start (or restart) the server
+//   ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij]
+//                                       start (or restart) the server
 //   ~/inference.mjs list                    show available profiles
 //
 // Reads ~/.config/inference/config.yaml. For each launch it:
 //   1. stops any running llama-server (frees 127.0.0.1:1234),
 //   2. writes a launcher script to <script_dir>/<profile>.sh,
 //   3. points the AGL default_model at the new server,
-//   4. opens a new Ghostty window running the launcher, so server logs
-//      stay visible and a crash is obvious (the window is kept open
-//      after exit while wait_after_exit is true).
+//   4. opens the launcher in a new Ghostty window (logs stay visible, window
+//      kept open after exit while wait_after_exit is true) or in a zellij
+//      floating pane in the target session (pane kept open after exit).
 //
 // Later: a process monitor / health check can wrap step 4 (e.g. restart
 // loop inside the launcher script, or a systemd user unit). For now the
@@ -120,12 +122,28 @@ function updateAglDefault(aglConfig, serverAlias, dryRun) {
 async function main() {
   const rawArgs = process.argv.slice(2);
   const dryRun = rawArgs.includes("--dry-run");
-  const positional = rawArgs.filter((a) => a !== "--dry-run");
+  // --launcher <ghostty|zellij> overrides the config file's `launcher` setting
+  let launcherOverride;
+  const scrubbed = [];
+  for (let i = 0; i < rawArgs.length; i++) {
+    if (rawArgs[i] === "--launcher") {
+      launcherOverride = rawArgs[i + 1];
+      i++;
+    } else {
+      scrubbed.push(rawArgs[i]);
+    }
+  }
+  if (rawArgs.includes("--launcher") && launcherOverride === undefined) {
+    console.error("error: --launcher needs a value (ghostty|zellij)");
+    process.exit(1);
+  }
+  const positional = scrubbed.filter((a) => a !== "--dry-run");
   const cfg = loadConfig();
+  const launcher = resolveLauncher(cfg, launcherOverride);
 
   const [cmd, ...rest] = positional;
   if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") {
-    console.log("usage: ~/inference.mjs <profile> [--dry-run] | ~/inference.mjs list");
+    console.log("usage: ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij] | ~/inference.mjs list");
     listProfiles(cfg);
     process.exit(cmd ? 0 : 1);
   }
@@ -156,30 +174,23 @@ async function main() {
     `status=$?\n` +
     `printf '\\nllama-server (profile ${cmd}) exited with status %s\\n' "$status"\n`;
 
-  const ghosttyBin = cfg.ghostty ?? "ghostty";
-  const ghosttyArgv = [];
-  if (cfg.wait_after_exit !== false) ghosttyArgv.push("--wait-after-command=true");
-  ghosttyArgv.push("-e", scriptPath);
-
   if (dryRun) {
     console.log(`[dry-run] profile:      ${cmd}`);
+    console.log(`[dry-run] launcher:     ${launcher}`);
     console.log(`[dry-run] server alias: ${serverAlias}`);
     console.log(`[dry-run] script:       ${scriptPath}`);
     console.log(`[dry-run] --- script body ---`);
     console.log(scriptBody.trimEnd());
-    console.log(`[dry-run] --- ghostty invocation ---`);
-    console.log(`[dry-run] ${ghosttyBin} ${ghosttyArgv.map(shQuote).join(" ")}`);
+    if (launcher === "zellij") {
+      console.log(`[dry-run] --- zellij invocation ---`);
+      console.log(`[dry-run] zellij ${buildZellijArgv(cfg, serverAlias, scriptPath).map(shQuote).join(" ")}`);
+    } else {
+      const ghosttyBin = cfg.ghostty ?? "ghostty";
+      console.log(`[dry-run] --- ghostty invocation ---`);
+      console.log(`[dry-run] ${ghosttyBin} ${buildGhosttyArgv(cfg, scriptPath).map(shQuote).join(" ")}`);
+    }
     updateAglDefault(cfg.agl_config, serverAlias, true);
     return;
-  }
-
-  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    console.error("error: no DISPLAY or WAYLAND_DISPLAY — ghostty needs a graphical session");
-    process.exit(1);
-  }
-  if (typeof Bun.which === "function" && !Bun.which(ghosttyBin)) {
-    console.error(`error: ghostty binary not found on PATH: ${ghosttyBin}`);
-    process.exit(1);
   }
 
   await stopExistingServer();
@@ -191,10 +202,90 @@ async function main() {
 
   updateAglDefault(cfg.agl_config, serverAlias, false);
 
+  if (launcher === "zellij") launchZellij(cfg, serverAlias, scriptPath);
+  else launchGhostty(cfg, scriptPath, serverAlias);
+}
+
+function resolveLauncher(cfg, override) {
+  const want = override ?? cfg.launcher ?? "auto";
+  if (!["ghostty", "zellij", "auto"].includes(want)) {
+    console.error(`error: unknown launcher '${want}' (want ghostty|zellij|auto)`);
+    process.exit(1);
+  }
+  if (want === "auto") return process.env.ZELLIJ_SESSION_NAME ? "zellij" : "ghostty";
+  return want;
+}
+
+function buildGhosttyArgv(cfg, scriptPath) {
+  const argv = [];
+  if (cfg.wait_after_exit !== false) argv.push("--wait-after-command=true");
+  argv.push("-e", scriptPath);
+  return argv;
+}
+
+function buildZellijArgv(cfg, serverAlias, scriptPath) {
+  const z = cfg.zellij ?? {};
+  const argv = [];
+  const session = z.session ?? process.env.ZELLIJ_SESSION_NAME;
+  if (session) argv.push("--session", String(session));
+  argv.push(
+    "action", "new-pane",
+    "--floating",
+    "--x", String(z.x ?? "0%"),
+    "--y", String(z.y ?? "0%"),
+    "--width", String(z.width ?? "60%"),
+    "--height", String(z.height ?? "50%"),
+    "--name", String(serverAlias),
+  );
+  if (z.focus !== true) argv.push("--no-focus"); // default: mari keeps focus
+  if (z.pinned === true) argv.push("--pinned", "true");
+  // no --close-on-exit: like ghostty's wait_after_exit, the pane stays open
+  // after exit so crash output stays readable
+  argv.push("--", scriptPath);
+  return argv;
+}
+
+function launchGhostty(cfg, scriptPath, serverAlias) {
+  if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    console.error("error: no DISPLAY or WAYLAND_DISPLAY — ghostty needs a graphical session");
+    process.exit(1);
+  }
+  const ghosttyBin = cfg.ghostty ?? "ghostty";
+  if (typeof Bun.which === "function" && !Bun.which(ghosttyBin)) {
+    console.error(`error: ghostty binary not found on PATH: ${ghosttyBin}`);
+    process.exit(1);
+  }
+  const ghosttyArgv = buildGhosttyArgv(cfg, scriptPath);
   console.log(`launch: ${ghosttyBin} ${ghosttyArgv.map(shQuote).join(" ")}`);
   const child = spawn(ghosttyBin, ghosttyArgv, { detached: true, stdio: "ignore" });
   child.unref();
   console.log(`server 'llama-server:${serverAlias}' starting in a new Ghostty window — logs visible there.`);
+}
+
+function launchZellij(cfg, serverAlias, scriptPath) {
+  const session = cfg.zellij?.session ?? process.env.ZELLIJ_SESSION_NAME;
+  if (!session && !process.env.ZELLIJ) {
+    console.error("error: zellij launcher needs a target session — run inside zellij or set zellij.session in config.yaml");
+    process.exit(1);
+  }
+  if (typeof Bun.which === "function" && !Bun.which("zellij")) {
+    console.error("error: zellij binary not found on PATH");
+    process.exit(1);
+  }
+  const argv = buildZellijArgv(cfg, serverAlias, scriptPath);
+  console.log(`launch: zellij ${argv.map(shQuote).join(" ")}`);
+  const r = spawnSync("zellij", argv, { encoding: "utf8" });
+  if (r.error) {
+    console.error(`error: failed to spawn zellij: ${r.error.message}`);
+    process.exit(1);
+  }
+  if (r.status !== 0) {
+    console.error(`error: zellij exited with status ${r.status}`);
+    if (r.stderr) console.error(r.stderr.trimEnd());
+    process.exit(1);
+  }
+  const paneId = (r.stdout ?? "").trim();
+  console.log(`server 'llama-server:${serverAlias}' starting in floating pane ${paneId || "(see zellij)"} — logs visible there.`);
 }
 
 await main();

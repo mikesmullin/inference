@@ -16,6 +16,21 @@ wait_after_exit: true
 agl_config: ~/.config/agl/config.yaml
 # Generated per-profile launcher scripts are written here (re-created each launch)
 script_dir: ~/.cache/inference
+# Which backend opens the server on each launch:
+#   ghostty — new Ghostty window (graphical session required)
+#   zellij  — floating pane in the target zellij session (run mari inside zellij)
+#   auto    — zellij when $ZELLIJ_SESSION_NAME is set, else ghostty
+launcher: auto
+# Geometry/appearance of the zellij floating pane
+# (bare ints = cells, percents = share of tab area)
+zellij:
+  session: null  # null = current session via $ZELLIJ_SESSION_NAME
+  x: "0%"        # top-left corner
+  y: "0%"
+  width: "60%"
+  height: "50%"
+  focus: false   # false passes --no-focus, so mari keeps focus while logs stay visible
+  pinned: false  # true passes --pinned true (always on top)
 
 models:
   # mari hotkey q — full 256k context

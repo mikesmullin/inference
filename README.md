@@ -2,9 +2,10 @@
 
 Local LLM server profiles + launcher. Each profile describes one
 `llama-server` invocation; `inference.mjs <profile>` stops any running
-server and starts the new one in its **own Ghostty window**, so server
-logs stay visible and a crash is obvious (the window is kept open after
-exit — the window is the process monitor for now).
+server and starts the new one via the configured **launcher backend** —
+a Ghostty window, or a floating pane in the current zellij session — so
+server logs stay visible and a crash is obvious (the window/pane is kept
+open after exit — it is the process monitor for now).
 
 Born from the [mari](https://github.com/mikesmullin/mari) `ai` activity:
 long hotkey shell commands moved here behind model-name aliases, so mari
@@ -18,9 +19,28 @@ hotkeys are one-liners like `~/inference.mjs qwen3.8-27b-nvfp4-mtp-q8attn`.
 ## Usage
 
 ```bash
-inference.mjs <profile> [--dry-run]   # launch (or relaunch) a server
+inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij]
+                                       # launch (or relaunch) a server
 inference.mjs list                    # show available profiles
 ```
+
+## Launchers
+
+`launcher:` in `config.yaml` picks where the server opens:
+
+- `ghostty` — new Ghostty window (the original behavior, needs a
+  graphical session)
+- `zellij` — floating pane in the target zellij session (run mari
+  inside zellij; hotkey `q` then just works)
+- `auto` — zellij when `$ZELLIJ_SESSION_NAME` is set, else ghostty
+
+`--launcher` overrides the config per invocation. The zellij backend
+runs the generated launcher script in a floating pane at the configured
+geometry (default top-left, 60%x50%), named after the server alias,
+without stealing focus (`focus: false`) and without `--close-on-exit`
+— the pane stays open after a crash so output stays readable, mirroring
+`wait_after_exit` for Ghostty. Set `zellij.session` only if launching
+from outside the target session.
 
 Each launch:
 
@@ -39,6 +59,15 @@ ghostty: ghostty                 # binary used to open the server window
 wait_after_exit: true            # keep window open after exit (read crashes)
 agl_config: ~/.config/agl/config.yaml  # default_model updated on launch (null to skip)
 script_dir: ~/.cache/inference   # generated launcher scripts live here
+launcher: auto                   # ghostty | zellij | auto (zellij if $ZELLIJ_SESSION_NAME)
+zellij:
+  session: null                  # null = current session
+  x: "0%"                        # top-left corner (cells or percents)
+  y: "0%"
+  width: "60%"
+  height: "50%"
+  focus: false                   # false = --no-focus, keep focus in mari
+  pinned: false                  # true = --pinned true (always on top)
 
 models:
   qwen3.8-27b-nvfp4-mtp-q8attn:
