@@ -6,12 +6,24 @@
 //   ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij]
 //                                       start (or restart) the server
 //   ~/inference.mjs list                show available profiles
-//   ~/inference.mjs kill                stop the tracked llama-server (lock pid)
+//   ~/inference.mjs kill                stop the tracked llama-server (lock pid);
+//                                       blocks until the process is gone
 //   ~/inference.mjs last [--wait <sec>] [--no-wait]
 //                                       relaunch the last non-kill profile
 //                                       (blocks until /health is 200;
 //                                       --no-wait returns after spawn,
 //                                       --wait <sec> sets the timeout)
+//   ~/inference.mjs comfy [args...]     launch ComfyUI (config: comfyui:),
+//                                       backgrounded, log in <script_dir>/comfy.log;
+//                                       passthrough args are appended and a
+//                                       passthrough --listen/--port overrides
+//                                       the defaults; blocks until /system_stats is 200
+//   ~/inference.mjs comfy-kill          stop the tracked ComfyUI (comfy.lock);
+//                                       blocks until the process is gone
+//
+// GPU hand-off pair (one tool call, so the shell outlives the LLM kill):
+//   ~/inference.mjs kill && ~/inference.mjs comfy && <assetgen job> \
+//     && ~/inference.mjs comfy-kill && ~/inference.mjs last
 //
 // Reads ~/.config/inference/config.yaml. For each launch it:
 //   1. stops any running llama-server (frees 127.0.0.1:1234),
@@ -26,8 +38,8 @@
 // visible window is the monitor.
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync, openSync, closeSync } from "node:fs";
+import { join, dirname } from "node:path";
 
 const HOME = process.env.HOME ?? "";
 const CONFIG_PATH = join(HOME, ".config/inference/config.yaml");
@@ -173,8 +185,10 @@ function saveLastProfile(name) {
   }
 }
 
-function killServer(cfg) {
+async function killServer(cfg) {
   // Prefer the lockfile PID; fall back to pgrep. Remove stale locks.
+  // Blocks until the process is actually gone (the driver reclaims its
+  // VRAM on exit), so callers can start the next GPU workload right after.
   const lock = readLock(cfg);
   let victims = [];
   if (lock?.pid && pidAlive(lock.pid)) {
@@ -197,17 +211,248 @@ function killServer(cfg) {
     console.log(`killing llama-server: ${victims.join(" ")} (no lock match — pkill fallback)`);
   }
   spawnSync("kill", victims.map(String));
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline && victims.some(pidAlive)) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
-  }
-  const still = victims.filter(pidAlive);
+  let deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && victims.some(pidAlive)) await sleep(200);
+  let still = victims.filter(pidAlive);
   if (still.length) {
     console.log(`still alive after 10s, SIGKILL: ${still.join(" ")}`);
     spawnSync("kill", ["-9", ...still.map(String)]);
+    deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && still.some(pidAlive)) await sleep(200);
+    still = victims.filter(pidAlive);
+    if (still.length) {
+      console.error(`error: llama-server still alive after SIGKILL: ${still.join(" ")}`);
+      process.exit(1);
+    }
   }
   clearLock(cfg);
   console.log("llama-server stopped (lock cleared, GPU freed).");
+}
+
+// --- GPU memory ---------------------------------------------------------------
+// nvidia-smi is used for the pre-launch check in `comfy`: warn when the GPU
+// is nearly full (the text LLM may still be loaded) instead of OOMing blind.
+
+function vramStats() {
+  try {
+    const r = spawnSync(
+      "nvidia-smi",
+      ["--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+      { encoding: "utf8" },
+    );
+    if (r.status !== 0) return null;
+    const m = r.stdout.trim().split("\n")[0]?.match(/(\d+)\s*,\s*(\d+)/);
+    return m ? { used: Number(m[1]), total: Number(m[2]) } : null;
+  } catch {
+    return null;
+  }
+}
+
+// --- ComfyUI (assetgen / diffusion workloads) ----------------------------------
+// `comfy` / `comfy-kill` are the GPU hand-off pair to `kill` / `last`.
+// ComfyUI runs in the background (no GUI window), logs to
+// <script_dir>/comfy.log, and is tracked in <script_dir>/comfy.lock.
+// Both commands block until they are truly done (health / death).
+
+const COMFY_DEFAULTS = {
+  dir: "/workspace/tmp/ComfyUI",
+  python: ".venv/bin/python",
+  args: ["main.py", "--listen", "127.0.0.1", "--port", "8188"],
+};
+
+function comfyConfig(cfg) {
+  const c = cfg.comfyui ?? {};
+  return {
+    dir: c.dir ?? COMFY_DEFAULTS.dir,
+    python: c.python ?? COMFY_DEFAULTS.python,
+    args: c.args ? [...c.args] : [...COMFY_DEFAULTS.args],
+  };
+}
+
+function comfyLockPath(cfg) {
+  return join(expand(cfg.script_dir ?? "~/.cache/inference"), "comfy.lock");
+}
+
+function readComfyLock(cfg) {
+  try {
+    const p = comfyLockPath(cfg);
+    if (!existsSync(p)) return null;
+    return JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeComfyLock(cfg, entry) {
+  const p = comfyLockPath(cfg);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(entry, null, 2) + "\n");
+}
+
+function clearComfyLock(cfg) {
+  try {
+    unlinkSync(comfyLockPath(cfg));
+  } catch { /* already gone */ }
+}
+
+// Value of the last occurrence of `flag` in args (null if absent or valueless).
+function flagValue(args, flag) {
+  const i = args.lastIndexOf(flag);
+  if (i >= 0 && i + 1 < args.length && !String(args[i + 1]).startsWith("--")) return String(args[i + 1]);
+  return null;
+}
+
+// Defaults + passthrough; a passthrough --listen/--port drops the default pair.
+function mergeComfyArgs(defaults, passthrough) {
+  const overridden = new Set(["--listen", "--port"].filter((f) => flagValue(passthrough, f) != null));
+  const out = [];
+  for (let i = 0; i < defaults.length; i++) {
+    if (overridden.has(String(defaults[i])) && i + 1 < defaults.length) {
+      i++; // drop the default value too
+      continue;
+    }
+    out.push(defaults[i]);
+  }
+  return [...out, ...passthrough];
+}
+
+async function comfyUp(port) {
+  // NOTE: /system_stats, not /system — ComfyUI 0.30.0 has no /system route
+  // (it 404s), so probing /system waits forever on a healthy server.
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/system_stats`, { signal: AbortSignal.timeout(1500) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForComfy(port, { timeoutMs = 300_000, pollMs = 1000 } = {}) {
+  const url = `http://127.0.0.1:${port}/system_stats`;
+  console.log(`waiting for ${url} ...`);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return true;
+    } catch {
+      // connection refused while ComfyUI is still starting — keep polling
+    }
+    await sleep(pollMs);
+  }
+  console.error(`error: timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${url}`);
+  return false;
+}
+
+async function killComfy(cfg) {
+  const lock = readComfyLock(cfg);
+  let victims = [];
+  if (lock?.pid && pidAlive(lock.pid)) {
+    victims = [Number(lock.pid)];
+  } else if (lock) {
+    console.log(`stale comfyui lock (pid ${lock.pid} not running) — clearing`);
+    clearComfyLock(cfg);
+  }
+  if (!victims.length) {
+    console.log("no tracked comfyui running.");
+    return;
+  }
+  const elapsed = fmtElapsed(Date.now() - (lock?.startedAt ?? Date.now()));
+  console.log(`killing comfyui pid ${victims.join(" ")} (launched ${fmtTime(lock?.startedAt ?? Date.now())} (${elapsed} ago), log ${lock?.log ?? "?"})`);
+  spawnSync("kill", victims.map(String));
+  let deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && victims.some(pidAlive)) await sleep(200);
+  let still = victims.filter(pidAlive);
+  if (still.length) {
+    console.log(`still alive after 10s, SIGKILL: ${still.join(" ")}`);
+    spawnSync("kill", ["-9", ...still.map(String)]);
+    deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && still.some(pidAlive)) await sleep(200);
+    still = victims.filter(pidAlive);
+    if (still.length) {
+      console.error(`error: comfyui still alive after SIGKILL: ${still.join(" ")}`);
+      process.exit(1);
+    }
+  }
+  clearComfyLock(cfg);
+  console.log("comfyui stopped (lock cleared, GPU freed).");
+}
+
+async function comfyCommand(cfg, cmd, rest, { dryRun, noWait, waitMs }) {
+  if (cmd === "comfy-kill") {
+    if (rest.length) {
+      console.error(`error: unexpected extra argument: ${rest.join(" ")}`);
+      process.exit(1);
+    }
+    await killComfy(cfg);
+    return;
+  }
+  // cmd === "comfy": rest is passthrough CLI args for ComfyUI.
+  const c = comfyConfig(cfg);
+  if (!existsSync(c.dir)) {
+    console.error(`error: comfyui dir not found: ${c.dir} (set comfyui.dir in ${CONFIG_PATH})`);
+    process.exit(1);
+  }
+  const py = expand(c.python.startsWith("~") ? c.python : join(c.dir, c.python));
+  if (!existsSync(py)) {
+    console.error(`error: comfyui python not found: ${py} (set comfyui.python in ${CONFIG_PATH})`);
+    process.exit(1);
+  }
+  const args = mergeComfyArgs(c.args, rest);
+  const port = Number(flagValue(args, "--port")) || 8188;
+
+  if (await comfyUp(port)) {
+    const lock = readComfyLock(cfg);
+    console.log(`comfyui already healthy on http://127.0.0.1:${port} (pid ${lock?.pid ?? "untracked"}) — nothing to do.`);
+    return;
+  }
+
+  const lock = readComfyLock(cfg);
+  if (lock?.pid && pidAlive(lock.pid)) {
+    console.error(`error: comfyui already running (pid ${lock.pid}, log ${lock.log ?? "?"}). Stop it first with: ~/inference.mjs comfy-kill`);
+    process.exit(1);
+  }
+  if (lock) clearComfyLock(cfg);
+
+  const vram = vramStats();
+  if (vram && vram.total > 0 && vram.used / vram.total > 0.75) {
+    console.warn(
+      `warning: GPU nearly full (${vram.used}/${vram.total} MiB) — the text LLM may still be loaded. Free it first with: ~/inference.mjs kill`,
+    );
+  }
+
+  const argv = [py, ...args];
+  if (dryRun) {
+    console.log(`[dry-run] comfyui: ${argv.join(" ")}`);
+    console.log(`[dry-run] health: http://127.0.0.1:${port}/system_stats`);
+    return;
+  }
+
+  const logPath = join(expand(cfg.script_dir ?? "~/.cache/inference"), "comfy.log");
+  mkdirSync(dirname(logPath), { recursive: true });
+  const logFd = openSync(logPath, "w");
+  console.log(`launch: ${argv.join(" ")}  (log: ${logPath})`);
+  const child = spawn(py, args, { cwd: c.dir, detached: true, stdio: ["ignore", logFd, logFd] });
+  child.on("error", (e) => console.error(`error: comfyui spawn failed: ${e.message}`));
+  child.unref();
+  closeSync(logFd);
+  if (!child.pid) {
+    clearComfyLock(cfg);
+    console.error("error: comfyui spawn failed — see log above.");
+    process.exit(1);
+  }
+  writeComfyLock(cfg, { pid: child.pid, startedAt: Date.now(), port, argv, log: logPath });
+  console.log(`comfyui starting (pid ${child.pid})`);
+  if (noWait) {
+    console.log(`comfyui spawned (pid ${child.pid}) — not waiting (--no-wait).`);
+    return;
+  }
+  const ok = await waitForComfy(port, { timeoutMs: waitMs, pollMs: 1000 });
+  if (!ok) {
+    console.error(`error: comfyui not healthy — check ${logPath}`);
+    process.exit(1);
+  }
+  console.log(`comfyui healthy on http://127.0.0.1:${port} (pid ${child.pid}, log ${logPath})`);
 }
 
 // Health: poll GET <healthUrl> until 2xx or timeout. Used by `last`
@@ -351,7 +596,7 @@ async function main() {
 
   const [cmd, ...rest] = positional;
   if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") {
-    console.log("usage: ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij] [--wait <sec>] [--no-wait] | ~/inference.mjs list|kill|last [--wait <sec>] [--no-wait]");
+    console.log("usage: ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij] [--wait <sec>] [--no-wait] | ~/inference.mjs list|kill|last [--wait <sec>] [--no-wait] | ~/inference.mjs comfy [--no-wait] [ComfyUI args...] | ~/inference.mjs comfy-kill");
     listProfiles(cfg);
     process.exit(cmd ? 0 : 1);
   }
@@ -364,7 +609,11 @@ async function main() {
       console.error(`error: unexpected extra argument: ${rest.join(" ")}`);
       process.exit(1);
     }
-    killServer(cfg);
+    await killServer(cfg);
+    return;
+  }
+  if (cmd === "comfy" || cmd === "comfy-kill") {
+    await comfyCommand(cfg, cmd, rest, { dryRun, noWait, waitMs });
     return;
   }
   if (cmd === "last") {

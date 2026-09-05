@@ -21,6 +21,14 @@ script_dir: ~/.cache/inference
 #   zellij  — floating pane in the target zellij session (run mari inside zellij)
 #   auto    — zellij when $ZELLIJ_SESSION_NAME is set, else ghostty
 launcher: auto
+# ComfyUI launch config for `~/inference.mjs comfy [args...]` / `comfy-kill`.
+# `args` are the default CLI args; command-line passthrough args are appended,
+# and a passthrough --listen/--port overrides the defaults here.
+comfyui:
+  dir: /workspace/tmp/ComfyUI
+  python: .venv/bin/python
+  args: [main.py, "--listen", "127.0.0.1", "--port", "8188"]
+
 # Geometry/appearance of the zellij floating pane
 # (bare ints = cells, percents = share of tab area)
 zellij:
