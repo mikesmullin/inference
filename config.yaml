@@ -18,7 +18,7 @@ agl_config: ~/.config/agl/config.yaml
 script_dir: ~/.cache/inference
 # Which backend opens the server on each launch:
 #   ghostty — new Ghostty window (graphical session required)
-#   zellij  — floating pane in the target zellij session (run mari inside zellij)
+#   zellij  — tiled pane in the target zellij session (run mari inside zellij)
 #   auto    — zellij when $ZELLIJ_SESSION_NAME is set, else ghostty
 launcher: auto
 # ComfyUI launch config for `~/inference.mjs comfy [args...]` / `comfy-kill`.
@@ -29,16 +29,11 @@ comfyui:
   python: .venv/bin/python
   args: [main.py, "--listen", "127.0.0.1", "--port", "8188"]
 
-# Geometry/appearance of the zellij floating pane
-# (bare ints = cells, percents = share of tab area)
+# Tiled pane in the target zellij session
 zellij:
   session: null  # null = current session via $ZELLIJ_SESSION_NAME
-  x: "0%"        # top-left corner
-  y: "0%"
-  width: "60%"
-  height: "50%"
+  direction: null  # null = zellij default split; or right/down/left/up
   focus: false   # false passes --no-focus, so mari keeps focus while logs stay visible
-  pinned: false  # true passes --pinned true (always on top)
 
 models:
   # mari hotkey q — full 256k context

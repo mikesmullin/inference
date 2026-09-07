@@ -3,7 +3,7 @@
 Local LLM server profiles + launcher. Each profile describes one
 `llama-server` invocation; `inference.mjs <profile>` stops any running
 server and starts the new one via the configured **launcher backend** —
-a Ghostty window, or a floating pane in the current zellij session — so
+a Ghostty window, or a tiled pane in the current zellij session — so
 server logs stay visible (`tail -F` of the server log). `inference.mjs`
 itself waits until `/health` is 200 and then **returns**; a detached
 monitor process owns `llama-server` and restarts it on crash (e.g. CUDA
@@ -34,16 +34,17 @@ inference.mjs list                    # show available profiles
 
 - `ghostty` — new Ghostty window (the original behavior, needs a
   graphical session)
-- `zellij` — floating pane in the target zellij session (run mari
+- `zellij` — tiled pane in the target zellij session (run mari
   inside zellij; hotkey `q` then just works)
 - `auto` — zellij when `$ZELLIJ_SESSION_NAME` is set, else ghostty
 
 `--launcher` overrides the config per invocation. The zellij backend
-opens a floating pane at the configured geometry (default top-left,
-60%x50%), named after the server alias, without stealing focus
-(`focus: false`). The pane runs `tail -F` on the server log so crash
-output stays readable, mirroring `wait_after_exit` for Ghostty. Set
-`zellij.session` only if launching from outside the target session.
+opens a tiled pane named after the server alias, without stealing
+focus (`focus: false`). Optional `zellij.direction` (`right` / `down` /
+`left` / `up`) picks the split; omit it for zellij's default. The pane
+runs `tail -F` on the server log so crash output stays readable,
+mirroring `wait_after_exit` for Ghostty. Set `zellij.session` only if
+launching from outside the target session.
 
 Each launch:
 
@@ -66,12 +67,8 @@ script_dir: ~/.cache/inference   # generated launcher scripts live here
 launcher: auto                   # ghostty | zellij | auto (zellij if $ZELLIJ_SESSION_NAME)
 zellij:
   session: null                  # null = current session
-  x: "0%"                        # top-left corner (cells or percents)
-  y: "0%"
-  width: "60%"
-  height: "50%"
+  direction: null                # null = default split; or right/down/left/up
   focus: false                   # false = --no-focus, keep focus in mari
-  pinned: false                  # true = --pinned true (always on top)
 
 models:
   qwen3.8-27b-nvfp4-mtp-q8attn:

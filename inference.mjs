@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // inference.mjs — launch a llama-server profile via the configured launcher
-// backend (a Ghostty window, or a floating pane in the current zellij session).
+// backend (a Ghostty window, or a tiled pane in the current zellij session).
 //
 // Usage:
 //   ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij]
@@ -31,7 +31,7 @@
 //   3. points the AGL default_model at the new server,
 //   4. opens the launcher in a new Ghostty window (logs stay visible, window
 //      kept open after exit while wait_after_exit is true) or in a zellij
-//      floating pane in the target session (pane kept open after exit).
+//      tiled pane in the target session (pane kept open after exit).
 //      llama-server itself is owned by a detached monitor process (not this
 //      script): it restarts on crash (e.g. CUDA abort) but not on
 //      SIGTERM/SIGINT/SIGHUP/SIGKILL or a clean exit. inference.mjs waits
@@ -120,7 +120,7 @@ function clearLock(cfg) {
 // --- zellij pane reuse ------------------------------------------------------
 // Find panes whose TITLE or COMMAND matches one of our launcher scripts
 // (i.e. panes previously opened by inference.mjs), so a relaunch can close
-// the stale one first instead of stacking a new floating pane each time.
+// the stale one first instead of stacking a new pane each time.
 function findInferencePanes(cfg, session) {
   try {
     const args = ["action", "list-panes", "-j"];
@@ -796,7 +796,7 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
 
   if (launcher === "zellij") {
     // Reuse: close stale inference panes first so relaunches replace the
-    // existing floating pane instead of stacking a new one each time.
+    // existing pane instead of stacking a new one each time.
     const session = cfg.zellij?.session ?? process.env.ZELLIJ_SESSION_NAME;
     closePanes(cfg, session, findInferencePanes(cfg, session));
     launchZellij(cfg, serverAlias, viewPath);
@@ -861,17 +861,9 @@ function buildZellijArgv(cfg, serverAlias, scriptPath) {
   const argv = [];
   const session = z.session ?? process.env.ZELLIJ_SESSION_NAME;
   if (session) argv.push("--session", String(session));
-  argv.push(
-    "action", "new-pane",
-    "--floating",
-    "--x", String(z.x ?? "0%"),
-    "--y", String(z.y ?? "0%"),
-    "--width", String(z.width ?? "60%"),
-    "--height", String(z.height ?? "50%"),
-    "--name", String(serverAlias),
-  );
+  argv.push("action", "new-pane", "--name", String(serverAlias));
+  if (z.direction) argv.push("--direction", String(z.direction));
   if (z.focus !== true) argv.push("--no-focus"); // default: mari keeps focus
-  if (z.pinned === true) argv.push("--pinned", "true");
   // no --close-on-exit: like ghostty's wait_after_exit, the pane stays open
   // after exit so crash output stays readable
   argv.push("--", scriptPath);
@@ -918,7 +910,7 @@ function launchZellij(cfg, serverAlias, scriptPath) {
     process.exit(1);
   }
   const paneId = (r.stdout ?? "").trim();
-  console.log(`logs for 'llama-server:${serverAlias}' in floating pane ${paneId || "(see zellij)"} (tail -F).`);
+  console.log(`logs for 'llama-server:${serverAlias}' in pane ${paneId || "(see zellij)"} (tail -F).`);
 }
 
 await main();
