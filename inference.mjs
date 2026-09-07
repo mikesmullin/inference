@@ -32,10 +32,10 @@
 //   4. opens the launcher in a new Ghostty window (logs stay visible, window
 //      kept open after exit while wait_after_exit is true) or in a zellij
 //      floating pane in the target session (pane kept open after exit).
-//
-// Later: a process monitor / health check can wrap step 4 (e.g. restart
-// loop inside the launcher script, or a systemd user unit). For now the
-// visible window is the monitor.
+//      llama-server itself is owned by a detached monitor process (not this
+//      script): it restarts on crash (e.g. CUDA abort) but not on
+//      SIGTERM/SIGINT/SIGHUP/SIGKILL or a clean exit. inference.mjs waits
+//      for /health then returns; the monitor keeps running.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync, openSync, closeSync } from "node:fs";
@@ -80,11 +80,22 @@ function pidsOfServer() {
 }
 
 // --- lock + state -----------------------------------------------------------
-// Lock: <script_dir>/server.lock  (JSON: { pid, profile, alias, startedAt })
+// Lock: <script_dir>/server.lock
+//   JSON: { pid, monitorPid, profile, alias, startedAt }
+//   pid        = llama-server (updated by the monitor on every spawn)
+//   monitorPid = detached crash-restart wrapper (process-group leader)
 // State: `last_profile` key persisted back into config.yaml (top-level).
 
 function lockPath(cfg) {
   return join(expand(cfg.script_dir ?? "~/.cache/inference"), "server.lock");
+}
+
+function logPath(cfg) {
+  return join(expand(cfg.script_dir ?? "~/.cache/inference"), "llama.log");
+}
+
+function occupancyAlive(lock) {
+  return pidAlive(lock?.pid) || pidAlive(lock?.monitorPid);
 }
 
 function readLock(cfg) {
@@ -186,47 +197,70 @@ function saveLastProfile(name) {
 }
 
 async function killServer(cfg) {
-  // Prefer the lockfile PID; fall back to pgrep. Remove stale locks.
+  // Prefer the lockfile; fall back to pgrep. Remove stale locks.
   // Blocks until the process is actually gone (the driver reclaims its
   // VRAM on exit), so callers can start the next GPU workload right after.
+  await stopLlama(cfg, { verbose: true });
+}
+
+// Stop the detached monitor (process group) and any llama-server pids.
+// Signaling the group reaps the wrapper even if it is in the 2s crash-restart
+// delay, when lock.pid is already dead and pgrep would see nothing.
+async function stopLlama(cfg, { verbose = false } = {}) {
   const lock = readLock(cfg);
-  let victims = [];
-  if (lock?.pid && pidAlive(lock.pid)) {
-    victims = [Number(lock.pid)];
-  } else {
+  const monitorPid = pidAlive(lock?.monitorPid) ? Number(lock.monitorPid) : null;
+  const serverPids = pidsOfServer();
+  if (pidAlive(lock?.pid) && !serverPids.includes(Number(lock.pid))) {
+    serverPids.push(Number(lock.pid));
+  }
+
+  if (!monitorPid && !serverPids.length) {
     if (lock) {
-      console.log(`stale lock (pid ${lock.pid} not running) — clearing`);
+      if (verbose) console.log(`stale lock (pid ${lock.pid} not running) — clearing`);
       clearLock(cfg);
     }
-    victims = pidsOfServer();
-  }
-  if (!victims.length) {
-    console.log("no llama-server running.");
+    if (verbose) console.log("no llama-server running.");
     return;
   }
-  if (lock?.pid && victims.includes(Number(lock.pid))) {
-    const elapsed = fmtElapsed(Date.now() - (lock.startedAt ?? Date.now()));
-    console.log(`killing profile '${lock.profile ?? "?"}' (alias ${lock.alias ?? "?"}), pid ${lock.pid}, launched ${fmtTime(lock.startedAt)} (${elapsed} ago)`);
+
+  if (verbose) {
+    if (lock?.profile) {
+      const elapsed = fmtElapsed(Date.now() - (lock.startedAt ?? Date.now()));
+      console.log(`killing profile '${lock.profile}' (alias ${lock.alias ?? "?"}), pid ${lock.pid ?? "?"}, monitor ${monitorPid ?? "?"}, launched ${fmtTime(lock.startedAt)} (${elapsed} ago)`);
+    } else {
+      console.log(`killing llama-server: ${serverPids.join(" ") || "(none)"} monitor ${monitorPid ?? "(none)"} (no lock match — pkill fallback)`);
+    }
   } else {
-    console.log(`killing llama-server: ${victims.join(" ")} (no lock match — pkill fallback)`);
+    const listed = [...serverPids, ...(monitorPid ? [monitorPid] : [])];
+    console.log(`stopping existing llama-server: ${listed.join(" ")}`);
   }
-  spawnSync("kill", victims.map(String));
+
+  // Process-group TERM reaps the wrapper even during the 2s restart delay.
+  // Individual TERM covers the case where the monitor is not the group leader.
+  if (monitorPid) spawnSync("kill", ["--", `-${monitorPid}`]);
+  const extra = [...serverPids, ...(monitorPid ? [monitorPid] : [])];
+  if (extra.length) spawnSync("kill", extra.map(String));
+
+  const tracked = [...new Set([...(monitorPid ? [monitorPid] : []), ...serverPids])];
   let deadline = Date.now() + 10_000;
-  while (Date.now() < deadline && victims.some(pidAlive)) await sleep(200);
-  let still = victims.filter(pidAlive);
+  while (Date.now() < deadline && (tracked.some(pidAlive) || pidsOfServer().length)) await sleep(200);
+
+  const still = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer()])];
   if (still.length) {
     console.log(`still alive after 10s, SIGKILL: ${still.join(" ")}`);
-    spawnSync("kill", ["-9", ...still.map(String)]);
+    if (monitorPid && pidAlive(monitorPid)) spawnSync("kill", ["-9", "--", `-${monitorPid}`]);
+    const leftoverPids = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer()])];
+    if (leftoverPids.length) spawnSync("kill", ["-9", ...leftoverPids.map(String)]);
     deadline = Date.now() + 10_000;
-    while (Date.now() < deadline && still.some(pidAlive)) await sleep(200);
-    still = victims.filter(pidAlive);
-    if (still.length) {
-      console.error(`error: llama-server still alive after SIGKILL: ${still.join(" ")}`);
+    while (Date.now() < deadline && (tracked.some(pidAlive) || pidsOfServer().length)) await sleep(200);
+    const leftover = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer()])];
+    if (leftover.length) {
+      console.error(`error: llama-server still alive after SIGKILL: ${leftover.join(" ")}`);
       process.exit(1);
     }
   }
   clearLock(cfg);
-  console.log("llama-server stopped (lock cleared, GPU freed).");
+  if (verbose) console.log("llama-server stopped (lock cleared, GPU freed).");
 }
 
 // --- GPU memory ---------------------------------------------------------------
@@ -498,18 +532,8 @@ function healthPortFor(m) {
   return 1234;
 }
 
-async function stopExistingServer() {
-  let victims = pidsOfServer();
-  if (!victims.length) return;
-  console.log(`stopping existing llama-server: ${victims.join(" ")}`);
-  spawnSync("kill", victims.map(String));
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline && pidsOfServer().length) await sleep(200);
-  const still = pidsOfServer();
-  if (still.length) {
-    console.log(`still alive after 10s, SIGKILL: ${still.join(" ")}`);
-    spawnSync("kill", ["-9", ...still.map(String)]);
-  }
+async function stopExistingServer(cfg) {
+  await stopLlama(cfg, { verbose: false });
 }
 
 function buildServerArgv(name, m) {
@@ -641,19 +665,19 @@ async function main() {
     process.exit(1);
   }
 
-  // Refuse to double-launch: a live lock means a server is already up.
+  // Refuse to double-launch: a live lock (server or monitor) means a server is already up.
   const existing = readLock(cfg);
   const livePids = pidsOfServer();
-  if (existing && pidAlive(existing.pid)) {
+  if (existing && occupancyAlive(existing)) {
     const elapsed = fmtElapsed(Date.now() - (existing.startedAt ?? Date.now()));
     console.error(
       `refusing to launch '${cmd}': profile '${existing.profile ?? "?"}' (alias ${existing.alias ?? "?"}) ` +
-      `already running as pid ${existing.pid}, launched ${fmtTime(existing.startedAt)} (${elapsed} ago).\n` +
+      `already running as pid ${existing.pid ?? "?"}, monitor ${existing.monitorPid ?? "?"}, launched ${fmtTime(existing.startedAt)} (${elapsed} ago).\n` +
       `stop it first with: ~/inference.mjs kill`,
     );
     process.exit(1);
   }
-  if (existing && !pidAlive(existing.pid)) {
+  if (existing && !occupancyAlive(existing)) {
     console.log(`clearing stale lock for pid ${existing.pid}`);
     clearLock(cfg);
   } else if (!existing && livePids.length && !dryRun) {
@@ -665,6 +689,63 @@ async function main() {
   await launchProfile(cfg, cmd, launchOpts);
 }
 
+function buildMonitorScript(name, serverAlias, argv, lockFile) {
+  // Restart on unexpected death (CUDA abort is 134). Do not restart when the
+  // operator (or `inference.mjs kill`) signaled the process: 0 clean exit,
+  // 129 SIGHUP, 130 SIGINT, 137 SIGKILL (killServer stage 2), 143 SIGTERM.
+  const cmd = argv.map(shQuote).join(" ");
+  const lock = shQuote(lockFile);
+  return `#!/bin/sh
+# Generated by ~/inference.mjs for profile '${name}' — do not edit.
+# Re-generated on every launch. Detached crash-restart monitor.
+
+write_lock() {
+  printf '{"pid":%s,"monitorPid":%s,"profile":"%s","alias":"%s","startedAt":%s000}\\n' "$1" "$$" ${shQuote(name)} ${shQuote(serverAlias)} "$(date +%s)" > ${lock}
+}
+
+pid=
+on_stop() {
+  if [ -n "$pid" ]; then
+    kill -s TERM "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  fi
+  exit 0
+}
+trap on_stop INT TERM HUP
+
+while :; do
+  ${cmd} &
+  pid=$!
+  write_lock "$pid"
+  wait "$pid"
+  status=$?
+  pid=
+  printf '\\nllama-server (profile ${name}) exited with status %s\\n' "$status"
+  case $status in
+    0|129|130|137|143) printf 'not restarting (clean or signaled stop)\\n'; break ;;
+  esac
+  printf 'crash — restarting\\n'
+  sleep 2
+done
+`;
+}
+
+function buildViewScript(name, llamaLog) {
+  return `#!/bin/sh
+# Generated by ~/inference.mjs for profile '${name}' — do not edit.
+exec tail -n +1 -F ${shQuote(llamaLog)}
+`;
+}
+
+function launchMonitor(scriptPath, llamaLog) {
+  const logFd = openSync(llamaLog, "a");
+  const child = spawn(scriptPath, [], { detached: true, stdio: ["ignore", logFd, logFd] });
+  child.on("error", (e) => console.error(`error: monitor spawn failed: ${e.message}`));
+  child.unref();
+  closeSync(logFd);
+  return child.pid;
+}
+
 async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
   const opts = { noWait, waitMs };
   const { serverAlias, argv } = buildServerArgv(name, cfg.models[name]);
@@ -672,39 +753,44 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
 
   const scriptDir = expand(cfg.script_dir ?? "~/.cache/inference");
   const scriptPath = join(scriptDir, `${name}.sh`);
-  const scriptBody =
-    `#!/bin/sh\n` +
-    `# Generated by ~/inference.mjs for profile '${name}' — do not edit.\n` +
-    `# Re-generated on every launch.\n` +
-    `${argv.map(shQuote).join(" ")}\n` +
-    `status=$?\n` +
-    `printf '\\nllama-server (profile ${name}) exited with status %s\\n' "$status"\n`;
+  const viewPath = join(scriptDir, `${name}.view.sh`);
+  const llamaLog = logPath(cfg);
+  const scriptBody = buildMonitorScript(name, serverAlias, argv, lockPath(cfg));
+  const viewBody = buildViewScript(name, llamaLog);
 
   if (dryRun) {
     console.log(`[dry-run] profile:      ${name}`);
     console.log(`[dry-run] launcher:     ${launcher}`);
     console.log(`[dry-run] server alias: ${serverAlias}`);
-    console.log(`[dry-run] script:       ${scriptPath}`);
-    console.log(`[dry-run] --- script body ---`);
+    console.log(`[dry-run] monitor:      ${scriptPath} (detached)`);
+    console.log(`[dry-run] log:          ${llamaLog}`);
+    console.log(`[dry-run] view:         ${viewPath}`);
+    console.log(`[dry-run] --- monitor script ---`);
     console.log(scriptBody.trimEnd());
+    console.log(`[dry-run] --- view script ---`);
+    console.log(viewBody.trimEnd());
     if (launcher === "zellij") {
       console.log(`[dry-run] --- zellij invocation ---`);
-      console.log(`[dry-run] zellij ${buildZellijArgv(cfg, serverAlias, scriptPath).map(shQuote).join(" ")}`);
+      console.log(`[dry-run] zellij ${buildZellijArgv(cfg, serverAlias, viewPath).map(shQuote).join(" ")}`);
     } else {
       const ghosttyBin = cfg.ghostty ?? "ghostty";
       console.log(`[dry-run] --- ghostty invocation ---`);
-      console.log(`[dry-run] ${ghosttyBin} ${buildGhosttyArgv(cfg, scriptPath).map(shQuote).join(" ")}`);
+      console.log(`[dry-run] ${ghosttyBin} ${buildGhosttyArgv(cfg, viewPath).map(shQuote).join(" ")}`);
     }
     updateAglDefault(cfg.agl_config, serverAlias, true);
     return;
   }
 
-  await stopExistingServer();
+  await stopExistingServer(cfg);
 
   mkdirSync(scriptDir, { recursive: true });
   writeFileSync(scriptPath, scriptBody);
   chmodSync(scriptPath, 0o755);
-  console.log(`wrote launcher: ${scriptPath}`);
+  writeFileSync(viewPath, viewBody);
+  chmodSync(viewPath, 0o755);
+  writeFileSync(llamaLog, "");
+  console.log(`wrote monitor: ${scriptPath}`);
+  console.log(`wrote view:    ${viewPath}`);
 
   updateAglDefault(cfg.agl_config, serverAlias, false);
 
@@ -713,12 +799,19 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
     // existing floating pane instead of stacking a new one each time.
     const session = cfg.zellij?.session ?? process.env.ZELLIJ_SESSION_NAME;
     closePanes(cfg, session, findInferencePanes(cfg, session));
-    launchZellij(cfg, serverAlias, scriptPath);
-  } else launchGhostty(cfg, scriptPath, serverAlias);
+    launchZellij(cfg, serverAlias, viewPath);
+  } else launchGhostty(cfg, viewPath, serverAlias);
 
-  // Record state for `kill` / `last`: find the freshly started server pid.
-  // The launcher (ghostty/zellij) spawns the script, which execs
-  // llama-server — give it a moment to appear, then take the newest pid.
+  const monitorPid = launchMonitor(scriptPath, llamaLog);
+  if (!monitorPid) {
+    console.error("error: monitor spawn failed — see log above.");
+    process.exit(1);
+  }
+  writeLock(cfg, { monitorPid, profile: name, alias: serverAlias, startedAt: Date.now() });
+  console.log(`monitor pid ${monitorPid} (detached); log ${llamaLog}`);
+
+  // Record llama-server pid for `kill` / `last`. The monitor writes the lock
+  // again once it has the child pid; we also fill it in from pgrep.
   let serverPid = null;
   for (let i = 0; i < 50; i++) {
     await sleep(200);
@@ -729,16 +822,18 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
     }
   }
   if (serverPid) {
-    writeLock(cfg, { pid: serverPid, profile: name, alias: serverAlias, startedAt: Date.now() });
+    const latest = readLock(cfg) ?? {};
+    writeLock(cfg, { ...latest, pid: serverPid, monitorPid, profile: name, alias: serverAlias, startedAt: latest.startedAt ?? Date.now() });
     console.log(`tracking pid ${serverPid} in ${lockPath(cfg)}`);
   } else {
-    console.warn("warning: no llama-server pid found after 10s — lock not written (kill/last guard disabled).");
+    console.warn("warning: no llama-server pid found after 10s — kill will use monitor pid / pgrep.");
   }
   saveLastProfile(name);
 
   // Block until the server is actually serving again, so a caller that just
   // freed the GPU (e.g. `kill; sleep 8; last` from a pi tool call) doesn't
-  // return while the model is still loading. Honors --no-wait.
+  // return while the model is still loading. Honors --no-wait. This process
+  // then exits; the monitor keeps running on its own.
   if (!opts.noWait) {
     await waitForHealth(cfg, cfg.models[name], { timeoutMs: opts.waitMs, pollMs: 2_000 });
   }
@@ -797,7 +892,7 @@ function launchGhostty(cfg, scriptPath, serverAlias) {
   console.log(`launch: ${ghosttyBin} ${ghosttyArgv.map(shQuote).join(" ")}`);
   const child = spawn(ghosttyBin, ghosttyArgv, { detached: true, stdio: "ignore" });
   child.unref();
-  console.log(`server 'llama-server:${serverAlias}' starting in a new Ghostty window — logs visible there.`);
+  console.log(`logs for 'llama-server:${serverAlias}' in a new Ghostty window (tail -F).`);
 }
 
 function launchZellij(cfg, serverAlias, scriptPath) {
@@ -823,7 +918,7 @@ function launchZellij(cfg, serverAlias, scriptPath) {
     process.exit(1);
   }
   const paneId = (r.stdout ?? "").trim();
-  console.log(`server 'llama-server:${serverAlias}' starting in floating pane ${paneId || "(see zellij)"} — logs visible there.`);
+  console.log(`logs for 'llama-server:${serverAlias}' in floating pane ${paneId || "(see zellij)"} (tail -F).`);
 }
 
 await main();

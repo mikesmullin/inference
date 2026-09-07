@@ -4,8 +4,12 @@ Local LLM server profiles + launcher. Each profile describes one
 `llama-server` invocation; `inference.mjs <profile>` stops any running
 server and starts the new one via the configured **launcher backend** —
 a Ghostty window, or a floating pane in the current zellij session — so
-server logs stay visible and a crash is obvious (the window/pane is kept
-open after exit — it is the process monitor for now).
+server logs stay visible (`tail -F` of the server log). `inference.mjs`
+itself waits until `/health` is 200 and then **returns**; a detached
+monitor process owns `llama-server` and restarts it on crash (e.g. CUDA
+abort). The monitor does **not** restart after `inference.mjs kill`
+(SIGTERM/SIGKILL). Closing the log window only stops `tail`, not the
+server — use `inference.mjs kill` to stop it.
 
 Born from the [mari](https://github.com/mikesmullin/mari) `ai` activity:
 long hotkey shell commands moved here behind model-name aliases, so mari
@@ -35,19 +39,19 @@ inference.mjs list                    # show available profiles
 - `auto` — zellij when `$ZELLIJ_SESSION_NAME` is set, else ghostty
 
 `--launcher` overrides the config per invocation. The zellij backend
-runs the generated launcher script in a floating pane at the configured
-geometry (default top-left, 60%x50%), named after the server alias,
-without stealing focus (`focus: false`) and without `--close-on-exit`
-— the pane stays open after a crash so output stays readable, mirroring
-`wait_after_exit` for Ghostty. Set `zellij.session` only if launching
-from outside the target session.
+opens a floating pane at the configured geometry (default top-left,
+60%x50%), named after the server alias, without stealing focus
+(`focus: false`). The pane runs `tail -F` on the server log so crash
+output stays readable, mirroring `wait_after_exit` for Ghostty. Set
+`zellij.session` only if launching from outside the target session.
 
 Each launch:
 
-1. Stops any running `llama-server` (SIGTERM, then SIGKILL after 10s) to free `127.0.0.1:1234`
-2. Writes a launcher script to `<script_dir>/<profile>.sh` (re-generated every time)
+1. Stops any running `llama-server` **and** its detached monitor (SIGTERM, then SIGKILL after 10s) to free `127.0.0.1:1234`
+2. Writes a monitor script (`<script_dir>/<profile>.sh`) and a log-view script (`<profile>.view.sh`)
 3. Points `default_model` in the AGL agent config at the new server
-4. Opens a new Ghostty window running the launcher (`-e` + `--wait-after-command`)
+4. Opens Ghostty/zellij on `tail -F <script_dir>/llama.log`
+5. Spawns the monitor as a detached process (stdio → `llama.log`), waits for `/health`, then exits
 
 `--dry-run` prints the assembled command, script body, and Ghostty
 invocation without touching anything.
