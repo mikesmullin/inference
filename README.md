@@ -50,7 +50,10 @@ Each launch:
 
 1. Stops any running `llama-server` **and** its detached monitor (SIGTERM, then SIGKILL after 10s) to free `127.0.0.1:1234`
 2. Writes a monitor script (`<script_dir>/<profile>.sh`) and a log-view script (`<profile>.view.sh`)
-3. Points `default_model` in the AGL agent config at the new server
+3. Syncs consumers of the :1234 slot: AGL `default_model` (stable
+   `llama-server:default`) plus the AGL `llama-server` default window, and
+   the pi `llama-server/default` contextWindow — all set to the profile's
+   `context_window`
 4. Opens Ghostty/zellij on `tail -F <script_dir>/llama.log`
 5. Spawns the monitor as a detached process (stdio → `llama.log`), waits for `/health`, then exits
 
@@ -72,7 +75,7 @@ zellij:
 
 models:
   qwen3.8-27b-nvfp4-mtp-q8attn:
-    server_alias: qwen3.8-27b-nvfp4-mtp-q8attn  # --alias (defaults to profile name)
+    context_window: 262144  # synced to AGL + pi on launch (else -c/--max-context)
     model: ~/.lmstudio/models/.../model.gguf   # -m (required)
     mmproj: ~/.lmstudio/models/.../mmproj.gguf # --mmproj (vision models)
     draft: ~/.lmstudio/models/.../draft.gguf   # -md (speculative draft model)
@@ -89,6 +92,18 @@ Notes:
   value containing `,` or `: ` inside a pair, e.g.
   `[--override-kv, "a=1,b=2"]`.
 - The launcher fail-fasts if a profile is unknown or a model file is missing.
+- Every profile serves model id `default` on :1234 (the pi harness sends
+  model "default" literally and ninfer validates the id). Profile identity
+  lives in the profile name (`lock.profile` / `last_profile`), not the id.
+- Custom binaries: set `server_bin`. With `model`/`mmproj`/`draft` the command
+  stays llama-style (`<bin> --alias default -m ... + args`) — for compatible
+  forks, e.g. PrismML's ternary-kernel build (see `ternary-bonsai-2-27b`).
+  With `artifact` instead, the command becomes
+  `<bin> <artifact> --model-id default + args` for non-llama backends
+  (see `qwen3.6-35b-a3b-ninfer` / ninfer-serve). Either way the backend must
+  serve OpenAI-compatible routes on the `--port` in `args` with a llama-style
+  `GET /health`. `server_process` overrides the
+  pgrep name for stop/kill tracking (default `llama-server`).
 
 ## Requirements
 

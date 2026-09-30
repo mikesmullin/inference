@@ -1,6 +1,10 @@
 #!/usr/bin/env bun
-// inference.mjs — launch a llama-server profile via the configured launcher
+// inference.mjs — launch an LLM server profile via the configured launcher
 // backend (a Ghostty window, or a tiled pane in the current zellij session).
+// Profiles are stock llama-server invocations by default. server_bin selects a
+// custom binary: a compatible fork (llama-style flags, needs `model`) or a
+// different OpenAI-compatible backend (ninfer-style, needs `artifact`). Either
+// way it serves the same :1234 slot and /health contract.
 //
 // Usage:
 //   ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij]
@@ -28,7 +32,9 @@
 // Reads ~/.config/inference/config.yaml. For each launch it:
 //   1. stops any running llama-server (frees 127.0.0.1:1234),
 //   2. writes a launcher script to <script_dir>/<profile>.sh,
-//   3. points the AGL default_model at the new server,
+//   3. syncs consumers: AGL default_model (= llama-server:default, stable)
+//      + llama-server default window, and pi llama-server/default
+//      contextWindow, all set to the profile's context_window,
 //   4. opens the launcher in a new Ghostty window (logs stay visible, window
 //      kept open after exit while wait_after_exit is true) or in a zellij
 //      tiled pane in the target session (pane kept open after exit).
@@ -68,13 +74,19 @@ function loadConfig() {
 function listProfiles(cfg) {
   console.log("available profiles:");
   for (const [name, m] of Object.entries(cfg.models)) {
-    const alias = m?.server_alias ?? name;
-    console.log(`  ${name}\n    -> llama-server:${alias}\n    -> ${m?.model ?? "(no model!)"}`);
+    const ctx = contextWindowFor(m);
+    // Every profile serves model id `default` on :1234; second line is the
+    // real binary. Profile identity lives in lock.profile / last_profile.
+    const src = m?.server_bin
+      ? `${m.server_process ?? m.server_bin} ${m?.artifact ?? "(no artifact!)"}`
+      : (m?.model ?? "(no model!)");
+    console.log(`  ${name}\n    -> llama-server:default${ctx != null ? ` (context ${ctx})` : ""}\n    -> ${src}`);
   }
 }
 
 function pidsOfServer() {
-  const r = spawnSync("pgrep", ["-x", "llama-server"], { encoding: "utf8" });
+  // Every backend serving the :1234 slot (llama-server, ninfer-serve, ...).
+  const r = spawnSync("pgrep", ["-x", "(llama-server|ninfer-serve)"], { encoding: "utf8" });
   if (r.status !== 0) return [];
   return r.stdout.split(/\s+/).filter(Boolean).map(Number).filter((pid) => pid !== process.pid);
 }
@@ -208,6 +220,7 @@ async function killServer(cfg) {
 // delay, when lock.pid is already dead and pgrep would see nothing.
 async function stopLlama(cfg, { verbose = false } = {}) {
   const lock = readLock(cfg);
+  const label = cfg.models?.[lock?.profile]?.server_process ?? "llama-server";
   const monitorPid = pidAlive(lock?.monitorPid) ? Number(lock.monitorPid) : null;
   const serverPids = pidsOfServer();
   if (pidAlive(lock?.pid) && !serverPids.includes(Number(lock.pid))) {
@@ -219,7 +232,7 @@ async function stopLlama(cfg, { verbose = false } = {}) {
       if (verbose) console.log(`stale lock (pid ${lock.pid} not running) — clearing`);
       clearLock(cfg);
     }
-    if (verbose) console.log("no llama-server running.");
+    if (verbose) console.log(`no ${label} running.`);
     return;
   }
 
@@ -228,11 +241,11 @@ async function stopLlama(cfg, { verbose = false } = {}) {
       const elapsed = fmtElapsed(Date.now() - (lock.startedAt ?? Date.now()));
       console.log(`killing profile '${lock.profile}' (alias ${lock.alias ?? "?"}), pid ${lock.pid ?? "?"}, monitor ${monitorPid ?? "?"}, launched ${fmtTime(lock.startedAt)} (${elapsed} ago)`);
     } else {
-      console.log(`killing llama-server: ${serverPids.join(" ") || "(none)"} monitor ${monitorPid ?? "(none)"} (no lock match — pkill fallback)`);
+      console.log(`killing ${label}: ${serverPids.join(" ") || "(none)"} monitor ${monitorPid ?? "(none)"} (no lock match — pkill fallback)`);
     }
   } else {
     const listed = [...serverPids, ...(monitorPid ? [monitorPid] : [])];
-    console.log(`stopping existing llama-server: ${listed.join(" ")}`);
+    console.log(`stopping existing ${label}: ${listed.join(" ")}`);
   }
 
   // Process-group TERM reaps the wrapper even during the 2s restart delay.
@@ -255,12 +268,12 @@ async function stopLlama(cfg, { verbose = false } = {}) {
     while (Date.now() < deadline && (tracked.some(pidAlive) || pidsOfServer().length)) await sleep(200);
     const leftover = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer()])];
     if (leftover.length) {
-      console.error(`error: llama-server still alive after SIGKILL: ${leftover.join(" ")}`);
+      console.error(`error: ${label} still alive after SIGKILL: ${leftover.join(" ")}`);
       process.exit(1);
     }
   }
   clearLock(cfg);
-  if (verbose) console.log("llama-server stopped (lock cleared, GPU freed).");
+  if (verbose) console.log(`${label} stopped (lock cleared, GPU freed).`);
 }
 
 // --- GPU memory ---------------------------------------------------------------
@@ -537,20 +550,40 @@ async function stopExistingServer(cfg) {
 }
 
 function buildServerArgv(name, m) {
-  if (!m || typeof m !== "object" || !m.model) {
-    console.error(`error: profile '${name}' must define at least 'model'`);
+  if (!m || typeof m !== "object") {
+    console.error(`error: profile '${name}' must be a mapping`);
     process.exit(1);
   }
-  const serverAlias = m.server_alias ?? name;
-  const argv = ["llama-server", "--alias", String(serverAlias), "-m", expand(m.model)];
+  // Every profile serves model id `default` (the pi harness sends "default"
+  // literally and ninfer validates the id). Identity lives in the profile
+  // name (lock.profile / last_profile), not the served id.
+  const serverAlias = "default";
+  const procName = m.server_process ?? "llama-server";
+  // args accepts bare "flag" items and [flag, value] pairs (one pair per line)
+  const pushArgs = (argv) => {
+    for (const a of m.args ?? []) {
+      if (Array.isArray(a)) for (const x of a) argv.push(String(x));
+      else argv.push(String(a));
+    }
+  };
+  if (m.server_bin && m.artifact) {
+    // Non-llama backend (e.g. ninfer-serve): argv is
+    // <bin> <artifact> --model-id default + args.
+    const argv = [expand(m.server_bin), expand(m.artifact), "--model-id", String(serverAlias)];
+    pushArgs(argv);
+    return { serverAlias, argv, procName, extraFiles: [argv[0], argv[1]] };
+  }
+  if (!m.model) {
+    console.error(`error: profile '${name}' must define 'model' (or server_bin + artifact)`);
+    process.exit(1);
+  }
+  // stock llama-server, or a compatible fork via server_bin (e.g. PrismML
+  // ternary kernels): <bin> --alias default -m <model> [--mmproj] [-md] + args.
+  const argv = [m.server_bin ? expand(m.server_bin) : "llama-server", "--alias", String(serverAlias), "-m", expand(m.model)];
   if (m.mmproj) argv.push("--mmproj", expand(m.mmproj));
   if (m.draft) argv.push("-md", expand(m.draft));
-  // args accepts bare "flag" items and [flag, value] pairs (one pair per line)
-  for (const a of m.args ?? []) {
-    if (Array.isArray(a)) for (const x of a) argv.push(String(x));
-    else argv.push(String(a));
-  }
-  return { serverAlias, argv };
+  pushArgs(argv);
+  return { serverAlias, argv, procName, extraFiles: m.server_bin ? [argv[0]] : [] };
 }
 
 function checkFilesExist(argv) {
@@ -564,20 +597,89 @@ function checkFilesExist(argv) {
   }
 }
 
-function updateAglDefault(aglConfig, serverAlias, dryRun) {
-  if (!aglConfig) return;
-  const aglPath = expand(aglConfig);
-  if (!existsSync(aglPath)) {
-    console.warn(`warning: agl config not found (${aglPath}), skipping default_model update`);
-    return;
+// Usable context length for a profile: explicit `context_window:` first,
+// else derived from the `-c` (llama) / `--max-context` (ninfer) flag.
+function contextWindowFor(m) {
+  const explicit = Number(m?.context_window);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
+  const flat = [];
+  for (const a of m?.args ?? []) {
+    if (Array.isArray(a)) for (const x of a) flat.push(String(x));
+    else flat.push(String(a));
   }
-  const next = `default_model: llama-server:${serverAlias}`;
-  const text = readFileSync(aglPath, "utf8");
-  const updated = /^default_model:/m.test(text)
-    ? text.replace(/^default_model:.*$/m, next)
-    : text.replace(/\n?$/, "\n") + next + "\n";
-  if (!dryRun) writeFileSync(aglPath, updated);
-  console.log(`agl default_model ${dryRun ? "would become" : "set to"}: llama-server:${serverAlias}`);
+  for (let i = 0; i < flat.length - 1; i++) {
+    if (flat[i] === "-c" || flat[i] === "--max-context") {
+      const n = Number(flat[i + 1]);
+      if (Number.isFinite(n) && n > 0) return Math.floor(n);
+    }
+  }
+  return null;
+}
+
+// Replace the `default:` value inside the `llama-server:` section of the AGL
+// config text (comment-preserving; no YAML round-trip). Returns null when
+// the section/key is missing.
+function setAglLlamaDefaultWindow(text, ctx) {
+  const lines = String(text).split("\n");
+  const provIdx = lines.findIndex((l) => /^  llama-server:\s*$/.test(l));
+  if (provIdx < 0) return null;
+  for (let i = provIdx + 1; i < lines.length; i++) {
+    if (/^  \S/.test(lines[i])) break; // next provider section
+    if (/^    default:\s*\S/.test(lines[i])) {
+      lines[i] = `    default: ${ctx}`;
+      return lines.join("\n");
+    }
+  }
+  return null;
+}
+
+// Sync consumers of the :1234 slot after a profile launch:
+//   AGL — default_model is stable (llama-server:default); the
+//           context_windows llama-server default tracks the profile.
+//   pi  — llama-server/default contextWindow tracks the profile.
+function updateConsumerConfigs(cfg, name, m, dryRun) {
+  const ctx = contextWindowFor(m);
+  if (cfg.agl_config) {
+    const aglPath = expand(cfg.agl_config);
+    if (!existsSync(aglPath)) {
+      console.warn(`warning: agl config not found (${aglPath}), skipping agl update`);
+    } else {
+      const next = `default_model: llama-server:default`;
+      let text = readFileSync(aglPath, "utf8");
+      text = /^default_model:/m.test(text)
+        ? text.replace(/^default_model:.*$/m, next)
+        : text.replace(/\n?$/, "\n") + next + "\n";
+      if (ctx != null) {
+        const withWindow = setAglLlamaDefaultWindow(text, ctx);
+        if (withWindow == null) {
+          console.warn(`warning: llama-server section/default not found in ${aglPath}, leaving context window unchanged`);
+        } else {
+          text = withWindow;
+        }
+      }
+      if (!dryRun) writeFileSync(aglPath, text);
+      console.log(`agl default_model ${dryRun ? "would become" : "set to"}: llama-server:default${ctx != null ? ` (context window ${ctx})` : ""}`);
+    }
+  }
+  if (cfg.pi_models) {
+    const piPath = expand(cfg.pi_models);
+    if (!existsSync(piPath)) {
+      console.warn(`warning: pi models not found (${piPath}), skipping pi update`);
+    } else if (ctx == null) {
+      console.warn(`warning: no context window for profile '${name}', leaving pi models unchanged`);
+    } else {
+      const pi = JSON.parse(readFileSync(piPath, "utf8"));
+      const entries = pi?.providers?.["llama-server"]?.models;
+      const row = Array.isArray(entries) ? entries.find((e) => e?.id === "default") : null;
+      if (!row) {
+        console.warn(`warning: llama-server/default not found in ${piPath}, leaving pi models unchanged`);
+      } else {
+        row.contextWindow = ctx;
+        if (!dryRun) writeFileSync(piPath, JSON.stringify(pi, null, 2) + "\n");
+        console.log(`pi llama-server/default contextWindow ${dryRun ? "would become" : "set to"}: ${ctx}`);
+      }
+    }
+  }
 }
 
 async function main() {
@@ -689,7 +791,7 @@ async function main() {
   await launchProfile(cfg, cmd, launchOpts);
 }
 
-function buildMonitorScript(name, serverAlias, argv, lockFile) {
+function buildMonitorScript(name, serverAlias, argv, lockFile, procName = "llama-server") {
   // Restart on unexpected death (CUDA abort is 134). Do not restart when the
   // operator (or `inference.mjs kill`) signaled the process: 0 clean exit,
   // 129 SIGHUP, 130 SIGINT, 137 SIGKILL (killServer stage 2), 143 SIGTERM.
@@ -720,7 +822,7 @@ while :; do
   wait "$pid"
   status=$?
   pid=
-  printf '\\nllama-server (profile ${name}) exited with status %s\\n' "$status"
+  printf '\\n${procName} (profile ${name}) exited with status %s\\n' "$status"
   case $status in
     0|129|130|137|143) printf 'not restarting (clean or signaled stop)\\n'; break ;;
   esac
@@ -748,20 +850,26 @@ function launchMonitor(scriptPath, llamaLog) {
 
 async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
   const opts = { noWait, waitMs };
-  const { serverAlias, argv } = buildServerArgv(name, cfg.models[name]);
+  const { serverAlias, argv, procName, extraFiles } = buildServerArgv(name, cfg.models[name]);
   checkFilesExist(argv);
+  for (const f of extraFiles ?? []) {
+    if (!existsSync(f)) {
+      console.error(`error: file not found: ${f}`);
+      process.exit(1);
+    }
+  }
 
   const scriptDir = expand(cfg.script_dir ?? "~/.cache/inference");
   const scriptPath = join(scriptDir, `${name}.sh`);
   const viewPath = join(scriptDir, `${name}.view.sh`);
   const llamaLog = logPath(cfg);
-  const scriptBody = buildMonitorScript(name, serverAlias, argv, lockPath(cfg));
+  const scriptBody = buildMonitorScript(name, serverAlias, argv, lockPath(cfg), procName);
   const viewBody = buildViewScript(name, llamaLog);
 
   if (dryRun) {
     console.log(`[dry-run] profile:      ${name}`);
     console.log(`[dry-run] launcher:     ${launcher}`);
-    console.log(`[dry-run] server alias: ${serverAlias}`);
+    console.log(`[dry-run] server model id: default (profile: ${name})`);
     console.log(`[dry-run] monitor:      ${scriptPath} (detached)`);
     console.log(`[dry-run] log:          ${llamaLog}`);
     console.log(`[dry-run] view:         ${viewPath}`);
@@ -771,13 +879,13 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
     console.log(viewBody.trimEnd());
     if (launcher === "zellij") {
       console.log(`[dry-run] --- zellij invocation ---`);
-      console.log(`[dry-run] zellij ${buildZellijArgv(cfg, serverAlias, viewPath).map(shQuote).join(" ")}`);
+      console.log(`[dry-run] zellij ${buildZellijArgv(cfg, name, viewPath).map(shQuote).join(" ")}`);
     } else {
       const ghosttyBin = cfg.ghostty ?? "ghostty";
       console.log(`[dry-run] --- ghostty invocation ---`);
       console.log(`[dry-run] ${ghosttyBin} ${buildGhosttyArgv(cfg, viewPath).map(shQuote).join(" ")}`);
     }
-    updateAglDefault(cfg.agl_config, serverAlias, true);
+    updateConsumerConfigs(cfg, name, cfg.models[name], true);
     return;
   }
 
@@ -792,15 +900,15 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
   console.log(`wrote monitor: ${scriptPath}`);
   console.log(`wrote view:    ${viewPath}`);
 
-  updateAglDefault(cfg.agl_config, serverAlias, false);
+  updateConsumerConfigs(cfg, name, cfg.models[name], false);
 
   if (launcher === "zellij") {
     // Reuse: close stale inference panes first so relaunches replace the
     // existing pane instead of stacking a new one each time.
     const session = cfg.zellij?.session ?? process.env.ZELLIJ_SESSION_NAME;
     closePanes(cfg, session, findInferencePanes(cfg, session));
-    launchZellij(cfg, serverAlias, viewPath);
-  } else launchGhostty(cfg, viewPath, serverAlias);
+    launchZellij(cfg, name, viewPath);
+  } else launchGhostty(cfg, viewPath, name);
 
   const monitorPid = launchMonitor(scriptPath, llamaLog);
   if (!monitorPid) {
@@ -826,7 +934,7 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
     writeLock(cfg, { ...latest, pid: serverPid, monitorPid, profile: name, alias: serverAlias, startedAt: latest.startedAt ?? Date.now() });
     console.log(`tracking pid ${serverPid} in ${lockPath(cfg)}`);
   } else {
-    console.warn("warning: no llama-server pid found after 10s — kill will use monitor pid / pgrep.");
+    console.warn(`warning: no ${procName} pid found after 10s — kill will use monitor pid / pgrep.`);
   }
   saveLastProfile(name);
 

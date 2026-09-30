@@ -6,6 +6,14 @@
 # live in one place. mari hotkeys now just call: ~/inference.mjs <profile>
 #
 # args style: bare "flag" items and [flag, value] pairs, one per line.
+#
+# Every profile serves model id `default` on :1234 (the pi harness sends
+# model "default" literally and ninfer validates the id). Identity lives in
+# the profile name (lock.profile / last_profile), not the served id.
+# `context_window:` is the usable context length for the profile. It is
+# synced on every launch to the AGL `llama-server.default` window and the pi
+# `llama-server/default` contextWindow. If omitted, it is derived from the
+# `-c` / `--max-context` flag in args.
 
 # Ghostty binary used to open the server window
 ghostty: ghostty
@@ -14,6 +22,9 @@ wait_after_exit: true
 # AGL agent config whose default_model is pointed at the newly started server.
 # Set to null to skip the update.
 agl_config: ~/.config/agl/config.yaml
+# Pi harness catalog whose llama-server/default contextWindow tracks the
+# launched profile (null to skip).
+pi_models: ~/.pi/agent/models.json
 # Generated per-profile launcher scripts are written here (re-created each launch)
 script_dir: ~/.cache/inference
 # Which backend opens the server on each launch:
@@ -38,6 +49,7 @@ zellij:
 models:
   # mari hotkey q — full 256k context
   qwen3.8-27b-nvfp4-mtp-q8attn:
+    context_window: 262144
     model: ~/.lmstudio/models/utautako/Qwen3.8-27B-NVFP4-MTP-Q8attn-GGUF/Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf
     mmproj: ~/.lmstudio/models/utautako/Qwen3.8-27B-NVFP4-MTP-Q8attn-GGUF/mmproj-Qwen3.8-27B-NVFP4-BF16.gguf
     args:
@@ -61,7 +73,7 @@ models:
 
   # mari hotkey h — same model, 128k context
   qwen3.8-27b-nvfp4-mtp-q8attn-128k:
-    server_alias: qwen3.8-27b-nvfp4-mtp-q8attn
+    context_window: 131072
     model: ~/.lmstudio/models/utautako/Qwen3.8-27B-NVFP4-MTP-Q8attn-GGUF/Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf
     mmproj: ~/.lmstudio/models/utautako/Qwen3.8-27B-NVFP4-MTP-Q8attn-GGUF/mmproj-Qwen3.8-27B-NVFP4-BF16.gguf
     args:
@@ -85,7 +97,7 @@ models:
 
   # mari hotkey m — with dflash draft model
   muse-glimmer-draft:
-    server_alias: muse-glimmer
+    context_window: 262144
     model: ~/.lmstudio/models/lmstudio-community/Muse-Glimmer-30B-GGUF/muse-glimmer-30B-kquant-17gb.gguf
     draft: ~/.lmstudio/models/lmstudio-community/Muse-Glimmer-30B-GGUF/dflash-kquant.gguf
     args:
@@ -110,8 +122,9 @@ models:
       - [--flash-attn, "on"]
       - --no-mmap
 
-  # mari hotkey n — no draft model
+  # ex mari hotkey n — no draft model (hotkey n now runs qwen3.6-35b-a3b-ninfer)
   muse-glimmer:
+    context_window: 262144
     model: ~/.lmstudio/models/lmstudio-community/Muse-Glimmer-30B-GGUF/muse-glimmer-30B-kquant-17gb.gguf
     args:
       - [-ngl, 99]
@@ -133,8 +146,148 @@ models:
       - [--flash-attn, "on"]
       - --no-mmap
 
+  # mari hotkey n — NInfer (ninfer-serve, NOT llama-server) with MTP3 speculative
+  # decode. Same 262144-token context as the llama presets, INT8 KV, published
+  # Structured-decode rate ~780 tok/s. Served on :1234 behind the same
+  # llama-server AGL endpoint name, so agents keep working unchanged.
+  # Needs ~26 GiB free VRAM at startup; stop other servers first (the launcher
+  # does that automatically). --vision loads the artifact's Vision weights for
+  # image/video input (--kv-capacity auto shrinks text KV to make room).
+  qwen3.6-35b-a3b-ninfer:
+    server_bin: /workspace/tmp/ninfer/vendor/ninfer/build/apps/ninfer-serve
+    server_process: ninfer-serve
+    context_window: 262144
+    artifact: /workspace/tmp/ninfer/models/qwen3_6_35b_a3b.ninfer
+    args:
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - [--max-context, 262144]
+      - [--kv-capacity, auto]
+      - [--max-concurrency, 1]
+      - [--max-pending-requests, 1]
+      - [--prefill-chunk, 1024]
+      - [--device, 0]
+      - [--kv-dtype, int8]
+      - [--spec, mtp]
+      - [--draft-tokens, 3]
+      - --lm-head-draft
+      - [--temperature, 0.6]
+      - [--top-p, 0.95]
+      - [--top-k, 20]
+      - [--min-p, 0]
+      - [--presence-penalty, 1.0]
+      - [--frequency-penalty, 0]
+      - --vision
+
+  # mari hotkey b — Ternary Bonsai 2 27B via the iamwavecut/ninfer-all fork.
+  # (The llama-GGUF preset was retired: 120 tok/s vs 420-590 here, and its
+  # 7.5 GB of files + fork binary were removed.)
+  # tuning results (structured SQL :1234, thinking off, seed 7):
+  # OPTION_A (K5/rk8v4): 529 tok/s @ 67.3% | B (K7/rk8v4): 608 @ 64.5%
+  # E (K7/rk4v4, current): 640 @ 65.2% (+21% over OPTION_A).
+  # H (done): effort flag alone was cosmetic (default path still burned full
+  # budget); --default-thinking-budget 2048 gives teeth. Sky probe: 191
+  # reasoning + full answer, stop. NEXT: C/D (MTP, greedy), I (calibrate).
+  # CTX 2026-09-26: max-context 262144 -> 524288 + --rope-yarn (native limit
+  # is 262144; measured fits to ~960k, 512k keeps 9.3 GB margin). OPTION_A
+  # stays frozen at 262144 without yarn.
+  ternary-bonsai-2-ninfer:
+    server_bin: /workspace/tmp/ninfer/vendor/ninfer-all/build/apps/ninfer-serve
+    server_process: ninfer-serve
+    context_window: 524288
+    artifact: /workspace/tmp/ninfer/models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer
+    args:
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - [--max-context, 524288]
+      - [--kv-capacity, auto]
+      - [--max-concurrency, 1]
+      - [--max-pending-requests, 1]
+      - [--prefill-chunk, 1024]
+      - [--device, 0]
+      - [--kv-dtype, rk4v4]
+      - --gdn-state-fp16
+      - --rope-yarn
+      # STEP C (done) — MTP K=3 lost single-stream: 345 @ 59.8% structured,
+      # 291 @ 46.4% thinking vs DFlash2 K7 640 @ 65.2%. Reverted.
+      # STEP D (done) — greedy SLOWER: 492 @ 46.2% vs stochastic 640 @ 65.2%.
+      # Draft head agrees more with the stochastic target; keep sampling.
+      # STEP I (done) — calibrated profile (41 keys) measured: 608/510/673
+      # across seeds vs 640 uncalibrated. Variance is stochastic acceptance
+      # (49-69%), not the profile. No gain over the built-in 5090 profile;
+      # dropped for simplicity (file kept at vendor/ninfer-all/).
+      - [--spec, dflash2]
+      - [--draft-tokens, 7]
+      - --vision
+      # STEP H — medium default effort + 2048 thinking-token budget.
+      # Effort label alone proved cosmetic (default path still burned 1024
+      # reasoning vs 273 for explicit per-request medium); the budget is the
+      # teeth. Caps runaway traces, forces early-close + answer. Per-request
+      # budget/effort override both. Tune 2048 up if hard tasks truncate.
+      - [--default-reasoning-effort, medium]
+      - [--default-thinking-budget, 2048]
+
+  # OPTION_A — frozen snapshot of ternary-bonsai-2-ninfer as of 2026-09-26
+  # (DFlash2 K=5, 262144 ctx, rk8v4, vision on). The live preset moved on to
+  # tuning experiments; launch this to come back to the known-good setup.
+  # (No hotkey — run ~/inference.mjs ternary-bonsai-2-ninfer-option-a.)
+  ternary-bonsai-2-ninfer-option-a:
+    server_bin: /workspace/tmp/ninfer/vendor/ninfer-all/build/apps/ninfer-serve
+    server_process: ninfer-serve
+    context_window: 262144
+    artifact: /workspace/tmp/ninfer/models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer
+    args:
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - [--max-context, 262144]
+      - [--kv-capacity, auto]
+      - [--max-concurrency, 1]
+      - [--max-pending-requests, 1]
+      - [--prefill-chunk, 1024]
+      - [--device, 0]
+      - [--kv-dtype, rk8v4]
+      - --gdn-state-fp16
+      - [--spec, dflash2]
+      - [--draft-tokens, 5]
+      - --vision
+
+  # mari hotkey q — Qwen3.8-27B NVFP4 via upstream ninfer, DFlash2 K=7.
+  # The "text max" shape proven on 8081: nvfp4 KV, no vision, no prefix
+  # reuse. Structured probe 327 tok/s @ 68%. Context 249856, not 258048:
+  # the 258048 fit had ~40 MB of margin and baseline VRAM drift (voice
+  # services) tipped it into a startup-OOM crashloop on :1234. 249856
+  # keeps ~150 MB of margin. (Replaces the llama GGUF q preset as the q
+  # hotkey; that profile stays launchable.) Upstream has no server-side
+  # effort flag — send reasoning_effort per request.
+  qwen3.8-27b-nvfp4-dflash2:
+    server_bin: /workspace/tmp/ninfer/vendor/ninfer/build/apps/ninfer-serve
+    server_process: ninfer-serve
+    context_window: 249856
+    artifact: /workspace/tmp/ninfer/models/qwen3_8_27b_nvfp4.ninfer
+    args:
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - [--max-context, 249856]
+      - [--kv-capacity, auto]
+      - [--max-concurrency, 1]
+      - [--max-pending-requests, 1]
+      - [--prefill-chunk, 1024]
+      - [--device, 0]
+      - [--kv-dtype, nvfp4]
+      - --no-prefix-reuse
+      - [--spec, dflash2]
+      - [--draft-tokens, 7]
+      - --lm-head-draft
+      - [--temperature, 0.6]
+      - [--top-p, 0.95]
+      - [--top-k, 20]
+      - [--min-p, 0]
+      - [--presence-penalty, 1.0]
+      - [--frequency-penalty, 0]
+
   # mari hotkey g — 1M context via YaRN
   gemma-4-12b-qat:
+    context_window: 1048576
     model: ~/.lmstudio/models/lmstudio-community/gemma-4-12B-it-QAT-GGUF/gemma-4-12B-it-QAT-Q4_0.gguf
     mmproj: ~/.lmstudio/models/lmstudio-community/gemma-4-12B-it-QAT-GGUF/mmproj-gemma-4-12B-it-QAT-BF16.gguf
     args:
@@ -155,4 +308,42 @@ models:
       - [-np, 1]
       - [--flash-attn, "on"]
       - --no-mmap
-last_profile: qwen3.8-27b-nvfp4-mtp-q8attn
+  # simple-jev classifier scoring (simplejev-mars demo).
+  # Tuned for a very different shape of work than the chat presets above: prompts are ~1.5k tokens,
+  # exactly one token is ever generated, and a decision issues one request per question. So the cost is
+  # all prefill, and the knobs that matter are batch width and slot count, not context length.
+  qwen3.8-27b-simplejev:
+    context_window: 32768
+    model: ~/.lmstudio/models/utautako/Qwen3.8-27B-NVFP4-MTP-Q8attn-GGUF/Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf
+    # no mmproj: the classifier is text-only, so the vision tower is VRAM and load time for nothing
+    args:
+      # no --spec-type: speculative decoding buys nothing when n_predict is 1 (measured: 1090 vs 1100 ms)
+      - [-ngl, 99]
+      # ONE slot, deliberately. Measured: with -np 4 the questions round-robin into separate slots and
+      # each re-evaluates the whole shared prefix (807/547/623/541 tokens per tick) because no slot holds
+      # the previous question's context. On one slot they chain -- the first question pays for the changed
+      # state, the rest reuse it and pay only their own tail (4/393/469/387). Scoring concurrently across
+      # slots measured no faster in wall time and often slower, so the adapter stays serial.
+      # 32k is far more than the ~1.5k prompts need; the rest would be KV cache we never touch.
+      - [-c, 32768]
+      - [-np, 1]
+      # f16 KV: with a small context there is no reason to pay dequant on every attention
+      - [-ctk, f16]
+      - [-ctv, f16]
+      # Wide batches. Measured trade-off, and it is not the obvious one: -ub 2048 DISABLES llama.cpp's
+      # partial prefix reuse (only a byte-identical prompt hits the cache; any divergence re-evaluates
+      # the whole prompt), while -ub 512 keeps reuse. Wide-and-dumb still wins, because the question
+      # tails are large next to the shared prefix -- 4 questions cost 647ms at -ub 2048 with no reuse
+      # vs 784ms at -ub 512 with reuse. -ub 1024 is the worst of both: no reuse, 758ms.
+      - [-b, 8192]
+      - [-ub, 2048]
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - --jinja
+      - [--reasoning-effort, low]
+      - --kv-unified
+      - [-t, 12]
+      - [--flash-attn, "on"]
+      - --no-mmap
+
+last_profile: qwen3.6-35b-a3b-ninfer
