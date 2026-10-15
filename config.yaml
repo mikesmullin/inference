@@ -367,16 +367,44 @@ models:
   # --model-id, adds --engine strata, and re-points --config at a copy whose
   # model_name is `default` (so GET /v1/models matches the :1234 contract).
   # The engine's own flags — pack, PLE shard, expert cache, MTP draft layer,
-  # --max-context, --kv — live in strata-iq3_xxs.json, which is generated and
-  # owned by `cd /workspace/tmp/strata && ./setup.sh --setup`. Re-running that
-  # (or --calibrate) REWRITES the file, which drops the one hand-edit it has:
-  #   --vram-reserve-mib 996
-  # Added 2026-10-14 because the engine warned `216 MiB of VRAM free with
-  # everything loaded - LOW: requests may stall` (docs/DETAILS.md:511 — a long
-  # prompt then hangs at "reading the prompt" with the GPU at 100%/low power).
-  # `voice` holds ~1.1 GB of VRAM, which the engine's auto 700 MiB reserve did
-  # not cover. With 996 the log says `510 MiB of VRAM free` and no LOW, at a
-  # cost of 207 expert slots (13125 -> 12918). Re-add it after any setup re-run.
+  # --max-context, --kv, --vision — live in strata-iq3_xxs.json, generated and
+  # owned by `cd /workspace/tmp/strata && ./setup.sh --setup`.
+  #
+  # That file is GITIGNORED upstream (.gitignore `/strata-*.json`, and likewise
+  # `/engine/` and `/run-*.sh`), in a checkout whose remote is Niko1221/Strata,
+  # not ours. So NONE of the state below is version-controlled anywhere except
+  # this comment. Rebuild it with:
+  #
+  #   cd /workspace/tmp/strata && ./setup.sh --setup --family qwen \
+  #     --model IQ3_XXS --context 131072 --kv int8 --vision cpu \
+  #     --port 1234 --yes --no-start --build
+  #   then put --vram-reserve-mib back to 996 in strata-iq3_xxs.json
+  #
+  # Pass every flag explicitly. A bare `--setup --yes` infers its answers from
+  # whichever strata-*.json was touched last (installed_configs() sorts by
+  # mtime) — strata-q2_0.json and strata-iq3_s.json have no vision block, so it
+  # would quietly reinstall a different size with images off. `--build` is
+  # required because get_prebuilt() returns early on BUILD.json
+  # "source": "local" (the engine was compiled on this box 2026-09-28), so
+  # without it setup skips build_engine, never produces engine/strata-vision,
+  # and writes a config pointing at a binary that does not exist.
+  #
+  # Two hand-edits this profile depends on:
+  #
+  # 1. --vram-reserve-mib 996; setup writes 700. The engine otherwise warns
+  #    `216 MiB of VRAM free with everything loaded - LOW: requests may stall`
+  #    (docs/DETAILS.md:511 — a long prompt then hangs at "reading the prompt",
+  #    GPU at 100% and low power). `voice` holds ~1.1 GB of VRAM that the auto
+  #    700 MiB reserve doesn't cover. At 996: `510 MiB of VRAM free`, no LOW.
+  # 2. Images ON through the CPU encoder (`"gpu": false, max_tokens: 300`),
+  #    2026-10-14. Free on the GPU — the expert cache moved only 12,918 ->
+  #    12,862 slots (-0.4%) — and a 640x480 image answered in 4.1 s end to end
+  #    (~1.7 s encode) on 32 Threadripper threads, not the 10-30 s the docs
+  #    quote for their Ryzen 5 7600. Tradeoff: the encoder downscales to ~300
+  #    image tokens while the engine logs that Qwen-VL wants 1,024 for
+  #    grounding, so expect weakness on "point at X", dense screenshots and
+  #    small-font OCR. `--vision gpu` gives 1,024 tokens and 0.1-0.5 s for
+  #    ~1.4 GB of VRAM (~1,000 expert slots), which wants `voice` stopped.
   qwen3.8-flash-next-strata-iq3xxs:
     server_bin: /workspace/tmp/strata/.venv/bin/strata-serve
     server_process: strata-serve
