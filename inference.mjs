@@ -86,7 +86,7 @@ function listProfiles(cfg) {
 
 function pidsOfServer() {
   // Every backend serving the :1234 slot (llama-server, ninfer-serve, ...).
-  const r = spawnSync("pgrep", ["-x", "(llama-server|ninfer-serve)"], { encoding: "utf8" });
+  const r = spawnSync("pgrep", ["-x", "(llama-server|ninfer-serve|strata-serve)"], { encoding: "utf8" });
   if (r.status !== 0) return [];
   return r.stdout.split(/\s+/).filter(Boolean).map(Number).filter((pid) => pid !== process.pid);
 }
