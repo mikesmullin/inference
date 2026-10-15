@@ -405,10 +405,21 @@ models:
   #    grounding, so expect weakness on "point at X", dense screenshots and
   #    small-font OCR. `--vision gpu` gives 1,024 tokens and 0.1-0.5 s for
   #    ~1.4 GB of VRAM (~1,000 expert slots), which wants `voice` stopped.
+  # 3. 2026-10-15 retune (all hand-applied to strata-iq3_xxs.json, none of
+  # which setup owns): --max-context 262144, --kv q4_0 (262K KV then costs
+  # the same VRAM as 131K int8 did), --spec 6, --suffix-draft 10, plus
+  # `calibrate.py` results for this 5090 box: --pcie-frac 0.35 (0.55 was
+  # the 5070 default; measured 143.5 vs 136.2 tok/s) and --spec-min-p 0.70
+  # (strict floor wins with deeper windows: 151.5 vs 129.5). 31 workers
+  # kept. Result: 12,451 expert slots (was 12,918), window up to 8 tokens,
+  # ~495 MiB VRAM free. Also needs vm.nr_hugepages=20480 at boot (runtime
+  # sysctl today; without it the 40 GiB arena falls back to 4 KB pages) —
+  # without the pool the engine still runs, just slower on expert streams.
+  # Backups: /tmp/strata-iq3_xxs.131k-backup.json, /tmp/calib-262k-q4.out.
   qwen3.8-flash-next-strata-iq3xxs:
     server_bin: /workspace/tmp/strata/.venv/bin/strata-serve
     server_process: strata-serve
-    context_window: 131072
+    context_window: 262144
     artifact: ~/.config/inference/strata-serve.py
     args:
       - [--config, /workspace/tmp/strata/strata-iq3_xxs.json]
@@ -416,7 +427,7 @@ models:
       - [--port, 1234]
       # Clamp max_tokens to the context left instead of rejecting with 400
       # (Strata copies llama.cpp's reject-by-default): pi sends maxTokens 32000
-      # against the 131072 window, and a 400 mid-run kills the agent turn.
+      # against the 262144 window, and a 400 mid-run kills the agent turn.
       - --fit-max-tokens
 
   # The best-quality size (ISTA-DASLab say IQ3_S matches the full BF16 model on
