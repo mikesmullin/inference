@@ -100,15 +100,23 @@ function slotPort(slot) {
 
 function pidsOfServer(slot) {
   // :1234 backends (llama-server, ninfer-serve, ...) vs :1237 backends
-  // (the h2o wrapper + its vllm child). No arg = every slot (for kill-all).
+  // (the h2o wrapper + its vllm child + the shim). No arg = every slot (for kill-all).
   const pat = slot === "systemone"
-    ? "(h2o-serve|vllm)"
+    ? "(h2o-serve|vllm|laya-serve)"
     : slot === "llm"
       ? "(llama-server|ninfer-serve|strata-serve)"
-      : "(llama-server|ninfer-serve|strata-serve|h2o-serve|vllm)";
+      : "(llama-server|ninfer-serve|strata-serve|h2o-serve|vllm|laya-serve)";
   const r = spawnSync("pgrep", ["-x", pat], { encoding: "utf8" });
-  if (r.status !== 0) return [];
-  return r.stdout.split(/\s+/).filter(Boolean).map(Number).filter((pid) => pid !== process.pid);
+  const pids = r.status === 0 ? r.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
+  if (slot === "systemone" || !slot) {
+    // The shim runs as a generic `python` (comm is truncated to 15 chars, so
+    // -x can never match it) — find it by full command line. Otherwise a
+    // SIGKILLed/crashed wrapper orphans it holding :1237 and the next launch
+    // fails to bind while `kill-son` reports success.
+    const s = spawnSync("pgrep", ["-f", "h2o_lightning_shim"], { encoding: "utf8" });
+    if (s.status === 0) pids.push(...s.stdout.split(/\s+/).filter(Boolean).map(Number));
+  }
+  return [...new Set(pids)].filter((pid) => Number.isFinite(pid) && pid !== process.pid);
 }
 
 // --- lock + state -----------------------------------------------------------

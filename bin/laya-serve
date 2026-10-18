@@ -1,0 +1,5 @@
+#!/bin/sh
+# inference.mjs invokes: bin/laya-serve  <shim>  --model-id default  <args>
+# Run the shim with the REAL openjev venv python (full path => venv detection
+# => torch/laya on sys.path). The shim forces comm=laya-serve (see laya-serve.py).
+exec /workspace/tmp/openjev/.venv/bin/python "$@"

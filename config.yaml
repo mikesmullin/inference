@@ -474,5 +474,23 @@ models:
       - [--max-model-len, 40960]
       - [--gpu-memory-utilization, 0.85]
 
-last_profile: qwen3.8-flash-next-strata-iq3xxs
+  # mari hotkey l — Laya (421M ModernBERT System One decision model) on the
+  # :1237 slot, a single in-process worker (~4.2 GB VRAM; 2 workers ~7.3 GB,
+  # 4 ~13.6 GB — docs/JEVLIKE.md §7). Coexists with the :1234 text slot; the
+  # launcher only stops the previous :1237 occupant. mail1's SystemOne client
+  # talks to it at SYSTEMONE_URL (default http://127.0.0.1:1237). One worker
+  # is deliberate — it leaves ~6 GiB headroom on the 32 GiB card while the
+  # running text model (~19 GB) still serves, which is the point of this slot.
+  laya-email:
+    slot: systemone
+    server_bin: ~/.config/inference/bin/laya-serve
+    server_process: laya-serve
+    artifact: ~/.config/inference/laya-serve.py
+    args:
+      - [--device, cuda]
+      - [--port, 1237]
+      - [--threads, 8]
+      - [--workers, 1]
+
+last_profile: ternary-bonsai-2-ninfer
 last_systemone: h2o-lightning-4b
