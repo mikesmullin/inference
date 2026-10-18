@@ -475,3 +475,4 @@ models:
       - [--gpu-memory-utilization, 0.85]
 
 last_profile: qwen3.8-flash-next-strata-iq3xxs
+last_systemone: h2o-lightning-4b
