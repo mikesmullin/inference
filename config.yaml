@@ -457,6 +457,9 @@ models:
   # :1237 occupant, so stop the :1234 model yourself if the card is full
   # (~/inference.mjs kill). VLLM itself listens on the internal --vllm-port;
   # :1237 is the shim and the only port anything should call.
+  # 0.85, not the card's 0.90: the always-on voice services hold ~3 GB, and
+  # 0.90 leaves ~100 MB of margin (startup-OOM crashloop territory). The 5%
+  # is KV cache this workload (short states, ~6 questions/call) never touches.
   h2o-lightning-4b:
     slot: systemone
     server_bin: ~/.config/inference/bin/h2o-serve
@@ -469,6 +472,6 @@ models:
       - [--vllm-port, 18000]
       - [--port, 1237]
       - [--max-model-len, 40960]
-      - [--gpu-memory-utilization, 0.90]
+      - [--gpu-memory-utilization, 0.85]
 
 last_profile: qwen3.8-flash-next-strata-iq3xxs
