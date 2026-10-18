@@ -26,7 +26,25 @@ hotkeys are one-liners like `~/inference.mjs qwen3.8-27b-nvfp4-mtp-q8attn`.
 inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij]
                                        # launch (or relaunch) a server
 inference.mjs list                    # show available profiles
+inference.mjs kill                    # stop the :1234 text slot
+inference.mjs kill-son                # stop the :1237 System One slot
+inference.mjs kill-all                # stop both (free the whole GPU)
+inference.mjs last | son-last          # relaunch the last profile per slot
 ```
+
+## Slots
+
+Two ports, two locks, two logs — they coexist. Launching one slot never stops
+the other:
+
+- `llm` — text models on **:1234** (`server.lock`, `llama.log`). The AGL
+  `default_model` and pi `llama-server/default` consumers track this slot.
+- `systemone` — System One decision models on **:1237** (`systemone.lock`,
+  `systemone.log`). A profile opts in with `slot: systemone`; consumer sync is
+  skipped (a decision endpoint cannot chat). First resident:
+  `h2o-lightning-4b` (mari hotkey `l`) — H2O-Lightning-4B via stock vLLM plus
+  the repo's `h2o_lightning_shim.py`, fronted by `h2o-serve.py`, weights in
+  `~/.lmstudio/models/h2oai/`, venv in mail1's `.venv`.
 
 ## Launchers
 

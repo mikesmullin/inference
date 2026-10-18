@@ -74,19 +74,39 @@ function loadConfig() {
 function listProfiles(cfg) {
   console.log("available profiles:");
   for (const [name, m] of Object.entries(cfg.models)) {
+    const slot = slotFor(m);
+    const port = healthPortFor(m);
     const ctx = contextWindowFor(m);
     // Every profile serves model id `default` on :1234; second line is the
     // real binary. Profile identity lives in lock.profile / last_profile.
     const src = m?.server_bin
       ? `${m.server_process ?? m.server_bin} ${m?.artifact ?? "(no artifact!)"}`
       : (m?.model ?? "(no model!)");
-    console.log(`  ${name}\n    -> llama-server:default${ctx != null ? ` (context ${ctx})` : ""}\n    -> ${src}`);
+    console.log(`  ${name} [${slot} :${port}]\n    -> llama-server:default${ctx != null ? ` (context ${ctx})` : ""}\n    -> ${src}`);
   }
 }
 
-function pidsOfServer() {
-  // Every backend serving the :1234 slot (llama-server, ninfer-serve, ...).
-  const r = spawnSync("pgrep", ["-x", "(llama-server|ninfer-serve|strata-serve)"], { encoding: "utf8" });
+// Two slots: `llm` serves text models on :1234, `systemone` serves System One
+// decision models (h2o-lightning + shim) on :1237. They coexist — launching one
+// must never stop the other. A profile opts into the second slot with
+// `slot: systemone`; everything without it stays on the :1234 slot.
+function slotFor(m) {
+  return m?.slot === "systemone" ? "systemone" : "llm";
+}
+
+function slotPort(slot) {
+  return slot === "systemone" ? 1237 : 1234;
+}
+
+function pidsOfServer(slot) {
+  // :1234 backends (llama-server, ninfer-serve, ...) vs :1237 backends
+  // (the h2o wrapper + its vllm child). No arg = every slot (for kill-all).
+  const pat = slot === "systemone"
+    ? "(h2o-serve|vllm)"
+    : slot === "llm"
+      ? "(llama-server|ninfer-serve|strata-serve)"
+      : "(llama-server|ninfer-serve|strata-serve|h2o-serve|vllm)";
+  const r = spawnSync("pgrep", ["-x", pat], { encoding: "utf8" });
   if (r.status !== 0) return [];
   return r.stdout.split(/\s+/).filter(Boolean).map(Number).filter((pid) => pid !== process.pid);
 }
@@ -98,21 +118,23 @@ function pidsOfServer() {
 //   monitorPid = detached crash-restart wrapper (process-group leader)
 // State: `last_profile` key persisted back into config.yaml (top-level).
 
-function lockPath(cfg) {
-  return join(expand(cfg.script_dir ?? "~/.cache/inference"), "server.lock");
+function lockPath(cfg, slot) {
+  const base = slot === "systemone" ? "systemone.lock" : "server.lock";
+  return join(expand(cfg.script_dir ?? "~/.cache/inference"), base);
 }
 
-function logPath(cfg) {
-  return join(expand(cfg.script_dir ?? "~/.cache/inference"), "llama.log");
+function logPath(cfg, slot) {
+  const base = slot === "systemone" ? "systemone.log" : "llama.log";
+  return join(expand(cfg.script_dir ?? "~/.cache/inference"), base);
 }
 
 function occupancyAlive(lock) {
   return pidAlive(lock?.pid) || pidAlive(lock?.monitorPid);
 }
 
-function readLock(cfg) {
+function readLock(cfg, slot) {
   try {
-    const p = lockPath(cfg);
+    const p = lockPath(cfg, slot);
     if (!existsSync(p)) return null;
     return JSON.parse(readFileSync(p, "utf8"));
   } catch {
@@ -120,13 +142,13 @@ function readLock(cfg) {
   }
 }
 
-function writeLock(cfg, entry) {
+function writeLock(cfg, slot, entry) {
   mkdirSync(expand(cfg.script_dir ?? "~/.cache/inference"), { recursive: true });
-  writeFileSync(lockPath(cfg), JSON.stringify(entry, null, 2) + "\n");
+  writeFileSync(lockPath(cfg, slot), JSON.stringify(entry, null, 2) + "\n");
 }
 
-function clearLock(cfg) {
-  try { unlinkSync(lockPath(cfg)); } catch { /* already gone */ }
+function clearLock(cfg, slot) {
+  try { unlinkSync(lockPath(cfg, slot)); } catch { /* already gone */ }
 }
 
 // --- zellij pane reuse ------------------------------------------------------
@@ -193,36 +215,45 @@ function fmtTime(ts) {
   }
 }
 
-function saveLastProfile(name) {
-  // Persist `last_profile` as program state in config.yaml (top-level key,
-  // sibling of `models:`). Minimal edit: replace or append one line.
+function saveLastProfile(name, slot) {
+  // Persist `last_profile` (llm slot) or `last_systemone` (systemone slot) as
+  // program state in config.yaml (top-level keys, siblings of `models:`).
+  // Minimal edit: replace or append one line.
+  const key = slot === "systemone" ? "last_systemone" : "last_profile";
   try {
     const text = readFileSync(CONFIG_PATH, "utf8");
-    const line = `last_profile: ${name}`;
-    const next = /^last_profile:.*$/m.test(text)
-      ? text.replace(/^last_profile:.*$/m, line)
+    const line = `${key}: ${name}`;
+    const re = new RegExp(`^${key}:.*$`, "m");
+    const next = re.test(text)
+      ? text.replace(re, line)
       : text.replace(/\n?$/, "\n") + line + "\n";
     writeFileSync(CONFIG_PATH, next);
   } catch (err) {
-    console.warn(`warning: could not persist last_profile: ${err.message}`);
+    console.warn(`warning: could not persist ${key}: ${err.message}`);
   }
 }
 
-async function killServer(cfg) {
+async function killServer(cfg, slot) {
   // Prefer the lockfile; fall back to pgrep. Remove stale locks.
   // Blocks until the process is actually gone (the driver reclaims its
   // VRAM on exit), so callers can start the next GPU workload right after.
-  await stopLlama(cfg, { verbose: true });
+  // No slot = both slots (free the whole GPU); a slot kills only its own.
+  if (!slot) {
+    await stopLlama(cfg, { verbose: true, slot: "llm" });
+    await stopLlama(cfg, { verbose: true, slot: "systemone" });
+    return;
+  }
+  await stopLlama(cfg, { verbose: true, slot });
 }
 
 // Stop the detached monitor (process group) and any llama-server pids.
 // Signaling the group reaps the wrapper even if it is in the 2s crash-restart
 // delay, when lock.pid is already dead and pgrep would see nothing.
-async function stopLlama(cfg, { verbose = false } = {}) {
-  const lock = readLock(cfg);
-  const label = cfg.models?.[lock?.profile]?.server_process ?? "llama-server";
+async function stopLlama(cfg, { verbose = false, slot = "llm" } = {}) {
+  const lock = readLock(cfg, slot);
+  const label = cfg.models?.[lock?.profile]?.server_process ?? (slot === "systemone" ? "h2o-serve" : "llama-server");
   const monitorPid = pidAlive(lock?.monitorPid) ? Number(lock.monitorPid) : null;
-  const serverPids = pidsOfServer();
+  const serverPids = pidsOfServer(slot);
   if (pidAlive(lock?.pid) && !serverPids.includes(Number(lock.pid))) {
     serverPids.push(Number(lock.pid));
   }
@@ -230,7 +261,7 @@ async function stopLlama(cfg, { verbose = false } = {}) {
   if (!monitorPid && !serverPids.length) {
     if (lock) {
       if (verbose) console.log(`stale lock (pid ${lock.pid} not running) — clearing`);
-      clearLock(cfg);
+      clearLock(cfg, slot);
     }
     if (verbose) console.log(`no ${label} running.`);
     return;
@@ -256,23 +287,23 @@ async function stopLlama(cfg, { verbose = false } = {}) {
 
   const tracked = [...new Set([...(monitorPid ? [monitorPid] : []), ...serverPids])];
   let deadline = Date.now() + 10_000;
-  while (Date.now() < deadline && (tracked.some(pidAlive) || pidsOfServer().length)) await sleep(200);
+  while (Date.now() < deadline && (tracked.some(pidAlive) || pidsOfServer(slot).length)) await sleep(200);
 
-  const still = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer()])];
+  const still = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer(slot)])];
   if (still.length) {
     console.log(`still alive after 10s, SIGKILL: ${still.join(" ")}`);
     if (monitorPid && pidAlive(monitorPid)) spawnSync("kill", ["-9", "--", `-${monitorPid}`]);
-    const leftoverPids = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer()])];
+    const leftoverPids = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer(slot)])];
     if (leftoverPids.length) spawnSync("kill", ["-9", ...leftoverPids.map(String)]);
     deadline = Date.now() + 10_000;
-    while (Date.now() < deadline && (tracked.some(pidAlive) || pidsOfServer().length)) await sleep(200);
-    const leftover = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer()])];
+    while (Date.now() < deadline && (tracked.some(pidAlive) || pidsOfServer(slot).length)) await sleep(200);
+    const leftover = [...new Set([...tracked.filter(pidAlive), ...pidsOfServer(slot)])];
     if (leftover.length) {
       console.error(`error: ${label} still alive after SIGKILL: ${leftover.join(" ")}`);
       process.exit(1);
     }
   }
-  clearLock(cfg);
+  clearLock(cfg, slot);
   if (verbose) console.log(`${label} stopped (lock cleared, GPU freed).`);
 }
 
@@ -545,8 +576,8 @@ function healthPortFor(m) {
   return 1234;
 }
 
-async function stopExistingServer(cfg) {
-  await stopLlama(cfg, { verbose: false });
+async function stopExistingServer(cfg, slot = "llm") {
+  await stopLlama(cfg, { verbose: false, slot });
 }
 
 function buildServerArgv(name, m) {
@@ -638,6 +669,13 @@ function setAglLlamaDefaultWindow(text, ctx) {
 //           context_windows llama-server default tracks the profile.
 //   pi  — llama-server/default contextWindow tracks the profile.
 function updateConsumerConfigs(cfg, name, m, dryRun) {
+  // The :1234 slot feeds the text-LLM consumers. A systemone profile serves a
+  // different port and a different API — syncing its context window into the
+  // text slots would point agents at a model that cannot chat.
+  if (slotFor(m) !== "llm") {
+    console.log(`profile '${name}' is a systemone (:1237) profile — leaving text-LLM consumers unchanged`);
+    return;
+  }
   const ctx = contextWindowFor(m);
   if (cfg.agl_config) {
     const aglPath = expand(cfg.agl_config);
@@ -722,7 +760,7 @@ async function main() {
 
   const [cmd, ...rest] = positional;
   if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") {
-    console.log("usage: ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij] [--wait <sec>] [--no-wait] | ~/inference.mjs list|kill|last [--wait <sec>] [--no-wait] | ~/inference.mjs comfy [--no-wait] [ComfyUI args...] | ~/inference.mjs comfy-kill");
+    console.log("usage: ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij] [--wait <sec>] [--no-wait] | ~/inference.mjs list|kill|kill-son|kill-all|last|son-last [--wait <sec>] [--no-wait] | ~/inference.mjs comfy [--no-wait] [ComfyUI args...] | ~/inference.mjs comfy-kill");
     listProfiles(cfg);
     process.exit(cmd ? 0 : 1);
   }
@@ -730,26 +768,31 @@ async function main() {
     listProfiles(cfg);
     return;
   }
-  if (cmd === "kill") {
+  if (cmd === "kill" || cmd === "kill-son" || cmd === "kill-all") {
     if (rest.length) {
       console.error(`error: unexpected extra argument: ${rest.join(" ")}`);
       process.exit(1);
     }
-    await killServer(cfg);
+    // `kill` keeps its historical meaning (the :1234 text slot). `kill-son`
+    // stops the :1237 System One slot, `kill-all` frees the whole GPU.
+    if (cmd === "kill") await killServer(cfg, "llm");
+    else if (cmd === "kill-son") await killServer(cfg, "systemone");
+    else await killServer(cfg);
     return;
   }
   if (cmd === "comfy" || cmd === "comfy-kill") {
     await comfyCommand(cfg, cmd, rest, { dryRun, noWait, waitMs });
     return;
   }
-  if (cmd === "last") {
+  if (cmd === "last" || cmd === "son-last") {
     if (rest.length) {
       console.error(`error: unexpected extra argument: ${rest.join(" ")}`);
       process.exit(1);
     }
-    const last = cfg.last_profile;
+    const key = cmd === "son-last" ? "last_systemone" : "last_profile";
+    const last = cfg[key];
     if (!last || !cfg.models[last]) {
-      console.error("error: no last profile recorded yet (launch a <profile> first).");
+      console.error(`error: no ${key} recorded yet (launch a ${cmd === "son-last" ? "systemone" : "<profile>"} first).`);
       listProfiles(cfg);
       process.exit(1);
     }
@@ -767,25 +810,29 @@ async function main() {
     process.exit(1);
   }
 
-  // Refuse to double-launch: a live lock (server or monitor) means a server is already up.
-  const existing = readLock(cfg);
-  const livePids = pidsOfServer();
+  // Refuse to double-launch within the profile's own slot: a live lock means a
+  // server is already up *there*. The other slot is untouched, so text (:1234)
+  // and systemone (:1237) coexist.
+  const slot = slotFor(cfg.models[cmd]);
+  const existing = readLock(cfg, slot);
+  const livePids = pidsOfServer(slot);
+  const stopHint = slot === "systemone" ? "~/inference.mjs kill-son" : "~/inference.mjs kill";
   if (existing && occupancyAlive(existing)) {
     const elapsed = fmtElapsed(Date.now() - (existing.startedAt ?? Date.now()));
     console.error(
       `refusing to launch '${cmd}': profile '${existing.profile ?? "?"}' (alias ${existing.alias ?? "?"}) ` +
       `already running as pid ${existing.pid ?? "?"}, monitor ${existing.monitorPid ?? "?"}, launched ${fmtTime(existing.startedAt)} (${elapsed} ago).\n` +
-      `stop it first with: ~/inference.mjs kill`,
+      `stop it first with: ${stopHint}`,
     );
     process.exit(1);
   }
   if (existing && !occupancyAlive(existing)) {
     console.log(`clearing stale lock for pid ${existing.pid}`);
-    clearLock(cfg);
+    clearLock(cfg, slot);
   } else if (!existing && livePids.length && !dryRun) {
     // Untracked server (lock deleted or launched by hand) — keep old
     // stop-and-replace behavior instead of refusing.
-    console.log(`untracked llama-server running (${livePids.join(" ")}) — stopping before launch`);
+    console.log(`untracked server running (${livePids.join(" ")}) — stopping before launch`);
   }
 
   await launchProfile(cfg, cmd, launchOpts);
@@ -850,6 +897,7 @@ function launchMonitor(scriptPath, llamaLog) {
 
 async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
   const opts = { noWait, waitMs };
+  const slot = slotFor(cfg.models[name]);
   const { serverAlias, argv, procName, extraFiles } = buildServerArgv(name, cfg.models[name]);
   checkFilesExist(argv);
   for (const f of extraFiles ?? []) {
@@ -862,8 +910,8 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
   const scriptDir = expand(cfg.script_dir ?? "~/.cache/inference");
   const scriptPath = join(scriptDir, `${name}.sh`);
   const viewPath = join(scriptDir, `${name}.view.sh`);
-  const llamaLog = logPath(cfg);
-  const scriptBody = buildMonitorScript(name, serverAlias, argv, lockPath(cfg), procName);
+  const llamaLog = logPath(cfg, slot);
+  const scriptBody = buildMonitorScript(name, serverAlias, argv, lockPath(cfg, slot), procName);
   const viewBody = buildViewScript(name, llamaLog);
 
   if (dryRun) {
@@ -889,7 +937,7 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
     return;
   }
 
-  await stopExistingServer(cfg);
+  await stopExistingServer(cfg, slot);
 
   mkdirSync(scriptDir, { recursive: true });
   writeFileSync(scriptPath, scriptBody);
@@ -915,7 +963,7 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
     console.error("error: monitor spawn failed — see log above.");
     process.exit(1);
   }
-  writeLock(cfg, { monitorPid, profile: name, alias: serverAlias, startedAt: Date.now() });
+  writeLock(cfg, slot, { monitorPid, profile: name, alias: serverAlias, startedAt: Date.now() });
   console.log(`monitor pid ${monitorPid} (detached); log ${llamaLog}`);
 
   // Record llama-server pid for `kill` / `last`. The monitor writes the lock
@@ -923,20 +971,20 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
   let serverPid = null;
   for (let i = 0; i < 50; i++) {
     await sleep(200);
-    const pids = pidsOfServer();
+    const pids = pidsOfServer(slot);
     if (pids.length) {
       serverPid = Math.max(...pids);
       break;
     }
   }
   if (serverPid) {
-    const latest = readLock(cfg) ?? {};
-    writeLock(cfg, { ...latest, pid: serverPid, monitorPid, profile: name, alias: serverAlias, startedAt: latest.startedAt ?? Date.now() });
-    console.log(`tracking pid ${serverPid} in ${lockPath(cfg)}`);
+    const latest = readLock(cfg, slot) ?? {};
+    writeLock(cfg, slot, { ...latest, pid: serverPid, monitorPid, profile: name, alias: serverAlias, startedAt: latest.startedAt ?? Date.now() });
+    console.log(`tracking pid ${serverPid} in ${lockPath(cfg, slot)}`);
   } else {
     console.warn(`warning: no ${procName} pid found after 10s — kill will use monitor pid / pgrep.`);
   }
-  saveLastProfile(name);
+  saveLastProfile(name, slot);
 
   // Block until the server is actually serving again, so a caller that just
   // freed the GPU (e.g. `kill; sleep 8; last` from a pi tool call) doesn't

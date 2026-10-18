@@ -449,4 +449,26 @@ models:
       - [--port, 1234]
       - --fit-max-tokens
 
+  # mari hotkey l — H2O-Lightning-4B (4B System One decision model) via stock
+  # vLLM + the repo's shim, on the :1237 System One slot. Coexists with the
+  # :1234 text slot: launching this never stops the text LLM and vice versa.
+  # mail1 talks to it at SYSTEMONE_URL (default http://127.0.0.1:1237).
+  # Needs ~10 GB free VRAM at startup; the launcher only stops a previous
+  # :1237 occupant, so stop the :1234 model yourself if the card is full
+  # (~/inference.mjs kill). VLLM itself listens on the internal --vllm-port;
+  # :1237 is the shim and the only port anything should call.
+  h2o-lightning-4b:
+    slot: systemone
+    server_bin: ~/.config/inference/bin/h2o-serve
+    server_process: h2o-serve
+    context_window: 40960
+    artifact: ~/.config/inference/h2o-serve.py
+    args:
+      - [--weights, ~/.lmstudio/models/h2oai/h2o-lightning-4b]
+      - [--venv, /workspace/email2/mail1/.venv]
+      - [--vllm-port, 18000]
+      - [--port, 1237]
+      - [--max-model-len, 40960]
+      - [--gpu-memory-utilization, 0.90]
+
 last_profile: qwen3.8-flash-next-strata-iq3xxs
