@@ -109,12 +109,19 @@ function pidsOfServer(slot) {
   const r = spawnSync("pgrep", ["-x", pat], { encoding: "utf8" });
   const pids = r.status === 0 ? r.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
   if (slot === "systemone" || !slot) {
-    // The shim runs as a generic `python` (comm is truncated to 15 chars, so
-    // -x can never match it) — find it by full command line. Otherwise a
+    // The vLLM shim runs as a generic `python` (comm is truncated to 15 chars,
+    // so -x can never match it) — find it by full command line. Otherwise a
     // SIGKILLed/crashed wrapper orphans it holding :1237 and the next launch
     // fails to bind while `kill-son` reports success.
     const s = spawnSync("pgrep", ["-f", "h2o_lightning_shim"], { encoding: "utf8" });
     if (s.status === 0) pids.push(...s.stdout.split(/\s+/).filter(Boolean).map(Number));
+    // The llama.cpp H2O decision server is a single process whose comm is the
+    // generic `llama-server` (not in the slot's -x pattern, deliberately — that
+    // pattern also serves the :1234 text models). Match it by the unique H2O
+    // model path/alias in its command line so kill-son/kill-all and the
+    // double-launch guard never leave a H2O server orphaned on :1237.
+    const h2o = spawnSync("pgrep", ["-f", "h2o-lightning-4b"], { encoding: "utf8" });
+    if (h2o.status === 0) pids.push(...h2o.stdout.split(/\s+/).filter(Boolean).map(Number));
   }
   return [...new Set(pids)].filter((pid) => Number.isFinite(pid) && pid !== process.pid);
 }

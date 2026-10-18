@@ -456,23 +456,25 @@ models:
   # Needs ~10 GB free VRAM at startup; the launcher only stops a previous
   # :1237 occupant, so stop the :1234 model yourself if the card is full
   # (~/inference.mjs kill). VLLM itself listens on the internal --vllm-port;
-  # :1237 is the shim and the only port anything should call.
-  # 0.85, not the card's 0.90: the always-on voice services hold ~3 GB, and
-  # 0.90 leaves ~100 MB of margin (startup-OOM crashloop territory). The 5%
-  # is KV cache this workload (short states, ~6 questions/call) never touches.
+  # h2o-lightning-4b: llama.cpp decision server (replaces vLLM). One process, no
+  # shim — the server exposes POST /v1/systemone natively and mail1's SystemOne
+  # client talks to it directly. Q8_0 GGUF ~4.2 GB weights -> ~5.2 GB VRAM total
+  # (weights + CUDA context + small KV at -c 8192), which fits beside the :1234
+  # text model. -c 8192 is far beyond mail1's states (avg ~654 tokens); -np 1
+  # for stable per-option probabilities (per the decision-server README).
   h2o-lightning-4b:
     slot: systemone
-    server_bin: ~/.config/inference/bin/h2o-serve
-    server_process: h2o-serve
-    context_window: 40960
-    artifact: ~/.config/inference/h2o-serve.py
+    server_bin: /workspace/tmp/llama.cpp-h2o-lightning/build/bin/llama-server
+    server_process: llama-server
+    model: /workspace/tmp/llama.cpp-h2o-lightning/models/h2o/h2o-lightning-4b-Q8_0.gguf
+    context_window: 8192
     args:
-      - [--weights, ~/.lmstudio/models/h2oai/h2o-lightning-4b]
-      - [--venv, /workspace/email2/mail1/.venv]
-      - [--vllm-port, 18000]
+      - [-c, "8192"]
+      - [-np, "1"]
+      - [--no-kv-unified]
+      - [--host, 127.0.0.1]
       - [--port, 1237]
-      - [--max-model-len, 40960]
-      - [--gpu-memory-utilization, 0.85]
+      - [--threads, 4]
 
   # mari hotkey l — Laya (421M ModernBERT System One decision model) on the
   # :1237 slot, a single in-process worker (~4.2 GB VRAM; 2 workers ~7.3 GB,
