@@ -494,5 +494,5 @@ models:
       - [--threads, 8]
       - [--workers, 1]
 
-last_profile: ternary-bonsai-2-ninfer
+last_profile: qwen3.6-35b-a3b-ninfer
 last_systemone: h2o-lightning-4b
