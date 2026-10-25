@@ -28,14 +28,15 @@ inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij]
 inference.mjs list                    # show available profiles
 inference.mjs kill                    # stop the :1234 text slot
 inference.mjs kill-son                # stop the :1237 System One slot
-inference.mjs kill-all                # stop both (free the whole GPU)
-inference.mjs last | son-last          # relaunch the last profile per slot
+inference.mjs kill-all                # stop text, System One, and OCR slots
+inference.mjs kill-ocr                # stop only OCR on :1239
+inference.mjs last | son-last | ocr-last          # relaunch the last profile per slot
 ```
 
 ## Slots
 
-Two ports, two locks, two logs — they coexist. Launching one slot never stops
-the other:
+Three independent ports, locks, and logs. Launching one slot never stops
+the others:
 
 - `llm` — text models on **:1234** (`server.lock`, `llama.log`). The AGL
   `default_model` and pi `llama-server/default` consumers track this slot.
@@ -45,6 +46,15 @@ the other:
   `h2o-lightning-4b` (mari hotkey `l`) — H2O-Lightning-4B via stock vLLM plus
   the repo's `h2o_lightning_shim.py`, fronted by `h2o-serve.py`, weights in
   `~/.lmstudio/models/h2oai/`, venv in mail1's `.venv`.
+
+- `ocr` — PaddleOCR PP-OCRv6 medium on **:1239** (`ocr.lock`, `ocr.log`).
+  Preset `paddleocr`, Mari AI hotkey `o`; `k`/`kill-all` includes it.
+  Uses `/workspace/mcp-computer-use/scripts/ocr-server.py` and that project's
+  `.venv-ocr`. It warms the model before reporting health. The MCP is only an
+  HTTP client; absent service means CPU fallback, never automatic GPU startup.
+  `kill-ocr` stops the monitor/process group and handles untracked `paddle-ocr`
+  processes, escalating to SIGKILL if necessary. Roughly 1.8 GiB process VRAM
+  sampled on RTX 5090; warm screenshot inference about one second.
 
 ## Launchers
 
@@ -56,24 +66,39 @@ the other:
   inside zellij; hotkey `q` then just works)
 - `auto` — zellij when `$ZELLIJ_SESSION_NAME` is set, else ghostty
 
-`--launcher` overrides the config per invocation. The zellij backend
-opens a tiled pane named after the server alias, without stealing
-focus (`focus: false`). Optional `zellij.direction` (`right` / `down` /
-`left` / `up`) picks the split; omit it for zellij's default. The pane
-runs `tail -F` on the server log so crash output stays readable,
-mirroring `wait_after_exit` for Ghostty. Set `zellij.session` only if
-launching from outside the target session.
+`--launcher` overrides the config per invocation. Zellij uses one reusable **pane**
+per slot inside whichever tab is currently active. It never creates a tab.
+
+| Pane group | Port | Presets |
+|---|---|---|
+| Text/misc (`llm`) | 1234 | Text/misc models |
+| Jev-like (`systemone`) | 1237 | H2O, Laya, qwen3.8-27b-simplejev |
+| OCR (`ocr`) | 1239 | PaddleOCR |
+
+A launch replaces its existing group pane in place if that pane is in the current
+tab. Otherwise it opens a pane in the current tab, then closes only that group's
+old log viewers elsewhere in the session. This keeps one viewer per group while
+preserving the other groups and unrelated panes (Mari, htop, nvtop, shells).
+The new viewer must open successfully before any old viewer is removed.
+`focus: false` preserves focus; `direction` sets the split for new panes.
+`zellij.session` targets a session when launching from outside it. `--dry-run`
+reports the group/current-tab behavior without changing panes.
+
+Port grouping does not change backend APIs: the SimpleJev preset still speaks
+its llama.cpp API, but now listens on **1237**. Its consumers must use that port.
+Only one profile may occupy a slot; stop that slot before switching profiles.
+Process discovery distinguishes a Jev llama-server on :1237 from text on :1234.
 
 Each launch:
 
-1. Stops any running `llama-server` **and** its detached monitor (SIGTERM, then SIGKILL after 10s) to free `127.0.0.1:1234`
+1. Stops untracked servers in the selected slot (TERM, then KILL after 10s); refuses double-launch when a live tracked profile already occupies it. Other slots are untouched.
 2. Writes a monitor script (`<script_dir>/<profile>.sh`) and a log-view script (`<profile>.view.sh`)
 3. Syncs consumers of the :1234 slot: AGL `default_model` (stable
    `llama-server:default`) plus the AGL `llama-server` default window, and
    the pi `llama-server/default` contextWindow — all set to the profile's
    `context_window`
-4. Opens Ghostty/zellij on `tail -F <script_dir>/llama.log`
-5. Spawns the monitor as a detached process (stdio → `llama.log`), waits for `/health`, then exits
+4. Opens Ghostty or reuses the group’s Zellij pane on `tail -F` of that slot’s log
+5. Spawns the monitor as a detached process (stdio → the slot’s log), waits for `/health`, then exits
 
 `--dry-run` prints the assembled command, script body, and Ghostty
 invocation without touching anything.

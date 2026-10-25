@@ -45,6 +45,7 @@ zellij:
   session: null  # null = current session via $ZELLIJ_SESSION_NAME
   direction: null  # null = zellij default split; or right/down/left/up
   focus: false   # false passes --no-focus, so mari keeps focus while logs stay visible
+  # One reusable log pane per slot, placed in whichever tab is currently active.
 
 models:
   # mari hotkey q — full 256k context
@@ -156,6 +157,7 @@ models:
   qwen3.6-35b-a3b-ninfer:
     server_bin: /workspace/tmp/ninfer/vendor/ninfer/build/apps/ninfer-serve
     server_process: ninfer-serve
+    input_modalities: [text]
     context_window: 262144
     artifact: /workspace/tmp/ninfer/models/qwen3_6_35b_a3b.ninfer
     args:
@@ -163,8 +165,8 @@ models:
       - [--port, 1234]
       - [--max-context, 262144]
       - [--kv-capacity, auto]
-      - [--max-concurrency, 1]
-      - [--max-pending-requests, 1]
+      - [--max-concurrency, 8]
+      - [--max-pending-requests, 7]
       - [--prefill-chunk, 1024]
       - [--device, 0]
       - [--kv-dtype, int8]
@@ -177,7 +179,6 @@ models:
       - [--min-p, 0]
       - [--presence-penalty, 1.0]
       - [--frequency-penalty, 0]
-      - --vision
 
   # mari hotkey b — Ternary Bonsai 2 27B via the iamwavecut/ninfer-all fork.
   # (The llama-GGUF preset was retired: 120 tok/s vs 420-590 here, and its
@@ -194,6 +195,7 @@ models:
   ternary-bonsai-2-ninfer:
     server_bin: /workspace/tmp/ninfer/vendor/ninfer-all/build/apps/ninfer-serve
     server_process: ninfer-serve
+    input_modalities: [text]
     context_window: 524288
     artifact: /workspace/tmp/ninfer/models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer
     args:
@@ -218,7 +220,6 @@ models:
       # dropped for simplicity (file kept at vendor/ninfer-all/).
       - [--spec, dflash2]
       - [--draft-tokens, 7]
-      - --vision
       # STEP H — medium default effort + 2048 thinking-token budget.
       # Effort label alone proved cosmetic (default path still burned 1024
       # reasoning vs 273 for explicit per-request medium); the budget is the
@@ -313,6 +314,8 @@ models:
   # exactly one token is ever generated, and a decision issues one request per question. So the cost is
   # all prefill, and the knobs that matter are batch width and slot count, not context length.
   qwen3.8-27b-simplejev:
+    slot: systemone
+    # Decision-scoring clients now connect to :1237, alongside other Jev presets.
     context_window: 32768
     model: ~/.lmstudio/models/utautako/Qwen3.8-27B-NVFP4-MTP-Q8attn-GGUF/Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf
     # no mmproj: the classifier is text-only, so the vision tower is VRAM and load time for nothing
@@ -338,7 +341,7 @@ models:
       - [-b, 8192]
       - [-ub, 2048]
       - [--host, 127.0.0.1]
-      - [--port, 1234]
+      - [--port, 1237]
       - --jinja
       - [--reasoning-effort, low]
       - --kv-unified
@@ -416,12 +419,16 @@ models:
   # sysctl today; without it the 40 GiB arena falls back to 4 KB pages) —
   # without the pool the engine still runs, just slower on expert streams.
   # Backups: /tmp/strata-iq3_xxs.131k-backup.json, /tmp/calib-262k-q4.out.
+  # 2026-10-25: --text-only strips vision from the derived runtime config,
+  # overriding the historical CPU-vision setup above even after setup regenerates it.
   qwen3.8-flash-next-strata-iq3xxs:
     server_bin: /workspace/tmp/strata/.venv/bin/strata-serve
     server_process: strata-serve
+    input_modalities: [text]
     context_window: 262144
     artifact: ~/.config/inference/strata-serve.py
     args:
+      - --text-only
       - [--config, /workspace/tmp/strata/strata-iq3_xxs.json]
       - [--host, 127.0.0.1]
       - [--port, 1234]
@@ -449,29 +456,25 @@ models:
       - [--port, 1234]
       - --fit-max-tokens
 
-  # mari hotkey l — H2O-Lightning-4B (4B System One decision model) via stock
-  # vLLM + the repo's shim, on the :1237 System One slot. Coexists with the
-  # :1234 text slot: launching this never stops the text LLM and vice versa.
-  # mail1 talks to it at SYSTEMONE_URL (default http://127.0.0.1:1237).
-  # Needs ~10 GB free VRAM at startup; the launcher only stops a previous
-  # :1237 occupant, so stop the :1234 model yourself if the card is full
-  # (~/inference.mjs kill). VLLM itself listens on the internal --vllm-port;
-  # h2o-lightning-4b: llama.cpp decision server (replaces vLLM). One process, no
-  # shim — the server exposes POST /v1/systemone natively and mail1's SystemOne
-  # client talks to it directly. Q8_0 GGUF ~4.2 GB weights -> ~5.2 GB VRAM total
-  # (weights + CUDA context + small KV at -c 8192), which fits beside the :1234
-  # text model. -c 8192 is far beyond mail1's states (avg ~654 tokens); -np 1
-  # for stable per-option probabilities (per the decision-server README).
+  # mari hotkey l — H2O-Lightning-4B via llama.cpp's native /v1/systemone API.
+  # The :1237 System One slot coexists with the :1234 text slot; launching
+  # this only replaces the previous :1237 occupant. mail1 uses SYSTEMONE_URL.
+  # Q8_0 text-only used ~5.2 GiB VRAM; vision adds the 0.63 GiB F16 projector
+  # plus runtime buffers (total with vision still to be measured).
+  # mmproj enables image decisions; 1024 image tokens is the model card's
+  # validated budget. Keep one slot for stable per-option probabilities.
   h2o-lightning-4b:
     slot: systemone
     server_bin: /workspace/tmp/llama.cpp-h2o-lightning/build/bin/llama-server
     server_process: llama-server
     model: /workspace/tmp/llama.cpp-h2o-lightning/models/h2o/h2o-lightning-4b-Q8_0.gguf
+    mmproj: /workspace/tmp/llama.cpp-h2o-lightning/models/h2o/mmproj-lightning-f16.gguf
     context_window: 8192
     args:
       - [-c, "8192"]
       - [-np, "1"]
       - [--no-kv-unified]
+      - [--image-max-tokens, "1024"]
       - [--host, 127.0.0.1]
       - [--port, 1237]
       - [--threads, 4]
@@ -494,5 +497,41 @@ models:
       - [--threads, 8]
       - [--workers, 1]
 
-last_profile: qwen3.6-35b-a3b-ninfer
+  # mari o — PaddleOCR PP-OCRv6 medium, independent :1239 service (~1.8 GiB VRAM).
+  # MCP only connects; GPU lifecycle belongs to inference/mari. k kills all slots.
+  paddleocr:
+    slot: ocr
+    server_bin: /workspace/mcp-computer-use/.venv-ocr/bin/python
+    server_process: paddle-ocr
+    artifact: /workspace/mcp-vision/scripts/ocr-server.py
+    args:
+      - [--port, 1239]
+      - [--device, gpu:0]
+
+  # Shared CPU vision service; operator-started, independent of text/OCR/H2O.
+  liquid-450m:
+    slot: vision
+    server_bin: /workspace/tmp/llama.cpp-h2o-lightning/build/bin/llama-server
+    server_process: llama-server
+    model: /workspace/mcp-computer-use/tmp/liquid-pretzel/models/LFM2.5-VL-450M-Q8_0.gguf
+    mmproj: /workspace/mcp-computer-use/tmp/liquid-pretzel/models/mmproj-LFM2.5-VL-450m-F16.gguf
+    context_window: 4096
+    args:
+      - [--host, 127.0.0.1]
+      - [--port, 1246]
+      - [--device, none]
+      - [-ngl, 0]
+      - --no-mmproj-offload
+      - --no-op-offload
+      - [-c, 4096]
+      - [-np, 1]
+      - [-t, 16]
+      - [-tb, 16]
+      - [--image-max-tokens, 256]
+      - [--repeat-penalty, 1.05]
+
+
+last_profile: ternary-bonsai-2-ninfer
 last_systemone: h2o-lightning-4b
+last_ocr: paddleocr
+last_vision: liquid-450m

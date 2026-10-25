@@ -43,6 +43,8 @@
 //      SIGTERM/SIGINT/SIGHUP/SIGKILL or a clean exit. inference.mjs waits
 //      for /health then returns; the monitor keeps running.
 
+import { processSlot } from "./process-slots.mjs";
+import { launchGroupedView } from "./zellij-panes.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, unlinkSync, openSync, closeSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -86,44 +88,36 @@ function listProfiles(cfg) {
   }
 }
 
-// Two slots: `llm` serves text models on :1234, `systemone` serves System One
-// decision models (h2o-lightning + shim) on :1237. They coexist — launching one
-// must never stop the other. A profile opts into the second slot with
-// `slot: systemone`; everything without it stays on the :1234 slot.
+// Independent slots: llm :1234, systemone :1237, ocr :1239.
+// Launching one slot never stops the others; kill-all stops all four.
 function slotFor(m) {
-  return m?.slot === "systemone" ? "systemone" : "llm";
+  return ["systemone", "ocr", "vision"].includes(m?.slot) ? m.slot : "llm";
 }
 
 function slotPort(slot) {
-  return slot === "systemone" ? 1237 : 1234;
+  return slot === "vision" ? 1246 : slot === "ocr" ? 1239 : slot === "systemone" ? 1237 : 1234;
 }
 
 function pidsOfServer(slot) {
-  // :1234 backends (llama-server, ninfer-serve, ...) vs :1237 backends
-  // (the h2o wrapper + its vllm child + the shim). No arg = every slot (for kill-all).
-  const pat = slot === "systemone"
-    ? "(h2o-serve|vllm|laya-serve)"
-    : slot === "llm"
-      ? "(llama-server|ninfer-serve|strata-serve)"
-      : "(llama-server|ninfer-serve|strata-serve|h2o-serve|vllm|laya-serve)";
-  const r = spawnSync("pgrep", ["-x", pat], { encoding: "utf8" });
-  const pids = r.status === 0 ? r.stdout.split(/\s+/).filter(Boolean).map(Number) : [];
-  if (slot === "systemone" || !slot) {
-    // The vLLM shim runs as a generic `python` (comm is truncated to 15 chars,
-    // so -x can never match it) — find it by full command line. Otherwise a
-    // SIGKILLed/crashed wrapper orphans it holding :1237 and the next launch
-    // fails to bind while `kill-son` reports success.
-    const s = spawnSync("pgrep", ["-f", "h2o_lightning_shim"], { encoding: "utf8" });
-    if (s.status === 0) pids.push(...s.stdout.split(/\s+/).filter(Boolean).map(Number));
-    // The llama.cpp H2O decision server is a single process whose comm is the
-    // generic `llama-server` (not in the slot's -x pattern, deliberately — that
-    // pattern also serves the :1234 text models). Match it by the unique H2O
-    // model path/alias in its command line so kill-son/kill-all and the
-    // double-launch guard never leave a H2O server orphaned on :1237.
-    const h2o = spawnSync("pgrep", ["-f", "h2o-lightning-4b"], { encoding: "utf8" });
-    if (h2o.status === 0) pids.push(...h2o.stdout.split(/\s+/).filter(Boolean).map(Number));
+  // Generic llama-server processes can belong to either :1234 or :1237.
+  // Classify by actual argv so stopping text does not kill a resident H2O model.
+  const candidates=new Set();
+  for(const args of [
+    ["-x","(llama-server|ninfer-serve|strata-serve|h2o-serve|vllm|laya-serve|paddle-ocr)"],
+    ["-f","h2o_lightning_shim"],
+  ]) {
+    const r=spawnSync("pgrep",args,{encoding:"utf8"});
+    if(r.status===0)for(const p of r.stdout.trim().split(/\s+/))candidates.add(Number(p));
   }
-  return [...new Set(pids)].filter((pid) => Number.isFinite(pid) && pid !== process.pid);
+  return [...candidates].filter(pid=>{
+    if(!Number.isFinite(pid)||pid===process.pid)return false;
+    try {
+      const comm=readFileSync(`/proc/${pid}/comm`,"utf8").trim();
+      const argv=readFileSync(`/proc/${pid}/cmdline`,"utf8").split("\0").filter(Boolean);
+      const actual=processSlot(comm,argv);
+      return actual!==null&&(!slot||actual===slot);
+    } catch { return false; } // exited during inspection
+  });
 }
 
 // --- lock + state -----------------------------------------------------------
@@ -134,12 +128,12 @@ function pidsOfServer(slot) {
 // State: `last_profile` key persisted back into config.yaml (top-level).
 
 function lockPath(cfg, slot) {
-  const base = slot === "systemone" ? "systemone.lock" : "server.lock";
+  const base = slot === "vision" ? "vision.lock" : slot === "ocr" ? "ocr.lock" : slot === "systemone" ? "systemone.lock" : "server.lock";
   return join(expand(cfg.script_dir ?? "~/.cache/inference"), base);
 }
 
 function logPath(cfg, slot) {
-  const base = slot === "systemone" ? "systemone.log" : "llama.log";
+  const base = slot === "vision" ? "vision.log" : slot === "ocr" ? "ocr.log" : slot === "systemone" ? "systemone.log" : "llama.log";
   return join(expand(cfg.script_dir ?? "~/.cache/inference"), base);
 }
 
@@ -164,42 +158,6 @@ function writeLock(cfg, slot, entry) {
 
 function clearLock(cfg, slot) {
   try { unlinkSync(lockPath(cfg, slot)); } catch { /* already gone */ }
-}
-
-// --- zellij pane reuse ------------------------------------------------------
-// Find panes whose TITLE or COMMAND matches one of our launcher scripts
-// (i.e. panes previously opened by inference.mjs), so a relaunch can close
-// the stale one first instead of stacking a new pane each time.
-function findInferencePanes(cfg, session) {
-  try {
-    const args = ["action", "list-panes", "-j"];
-    if (session) args.unshift("--session", String(session));
-    const r = spawnSync("zellij", args, { encoding: "utf8" });
-    if (r.status !== 0 || !r.stdout) return [];
-    const panes = JSON.parse(r.stdout);
-    const scriptDir = expand(cfg.script_dir ?? "~/.cache/inference");
-    const list = Array.isArray(panes) ? panes : panes?.panes ?? [];
-    return list
-      .filter((p) => {
-        if (p?.is_plugin) return false;
-        const hay = `${p?.title ?? ""}\n${p?.terminal_command ?? ""}\n${p?.command ?? ""}`;
-        return hay.includes(scriptDir);
-      })
-      // close-pane -p accepts a bare integer or terminal_<n>
-      .map((p) => p?.pane_id ?? (p?.id != null ? `terminal_${p.id}` : null))
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function closePanes(cfg, session, paneIds) {
-  for (const id of paneIds) {
-    const args = ["action", "close-pane", "-p", String(id)];
-    if (session) args.unshift("--session", String(session));
-    spawnSync("zellij", args, { encoding: "utf8" });
-    console.log(`closed stale inference pane ${id}`);
-  }
 }
 
 function pidAlive(pid) {
@@ -234,7 +192,7 @@ function saveLastProfile(name, slot) {
   // Persist `last_profile` (llm slot) or `last_systemone` (systemone slot) as
   // program state in config.yaml (top-level keys, siblings of `models:`).
   // Minimal edit: replace or append one line.
-  const key = slot === "systemone" ? "last_systemone" : "last_profile";
+  const key = slot === "vision" ? "last_vision" : slot === "ocr" ? "last_ocr" : slot === "systemone" ? "last_systemone" : "last_profile";
   try {
     const text = readFileSync(CONFIG_PATH, "utf8");
     const line = `${key}: ${name}`;
@@ -256,6 +214,8 @@ async function killServer(cfg, slot) {
   if (!slot) {
     await stopLlama(cfg, { verbose: true, slot: "llm" });
     await stopLlama(cfg, { verbose: true, slot: "systemone" });
+    await stopLlama(cfg, { verbose: true, slot: "ocr" });
+    await stopLlama(cfg, { verbose: true, slot: "vision" });
     return;
   }
   await stopLlama(cfg, { verbose: true, slot });
@@ -266,7 +226,7 @@ async function killServer(cfg, slot) {
 // delay, when lock.pid is already dead and pgrep would see nothing.
 async function stopLlama(cfg, { verbose = false, slot = "llm" } = {}) {
   const lock = readLock(cfg, slot);
-  const label = cfg.models?.[lock?.profile]?.server_process ?? (slot === "systemone" ? "h2o-serve" : "llama-server");
+  const label = cfg.models?.[lock?.profile]?.server_process ?? (slot === "ocr" ? "paddle-ocr" : slot === "systemone" ? "h2o-serve" : "llama-server");
   const monitorPid = pidAlive(lock?.monitorPid) ? Number(lock.monitorPid) : null;
   const serverPids = pidsOfServer(slot);
   if (pidAlive(lock?.pid) && !serverPids.includes(Number(lock.pid))) {
@@ -688,7 +648,7 @@ function updateConsumerConfigs(cfg, name, m, dryRun) {
   // different port and a different API — syncing its context window into the
   // text slots would point agents at a model that cannot chat.
   if (slotFor(m) !== "llm") {
-    console.log(`profile '${name}' is a systemone (:1237) profile — leaving text-LLM consumers unchanged`);
+    console.log(`profile '${name}' is a ${slotFor(m)} (:${slotPort(slotFor(m))}) profile — leaving text-LLM consumers unchanged`);
     return;
   }
   const ctx = contextWindowFor(m);
@@ -728,6 +688,9 @@ function updateConsumerConfigs(cfg, name, m, dryRun) {
         console.warn(`warning: llama-server/default not found in ${piPath}, leaving pi models unchanged`);
       } else {
         row.contextWindow = ctx;
+        // Explicit per-preset modality override; infer legacy vision presets too.
+        const args = (m.args ?? []).flat();
+        row.input = m.input_modalities ?? ((m.mmproj || args.includes("--vision")) ? ["text", "image"] : ["text"]);
         if (!dryRun) writeFileSync(piPath, JSON.stringify(pi, null, 2) + "\n");
         console.log(`pi llama-server/default contextWindow ${dryRun ? "would become" : "set to"}: ${ctx}`);
       }
@@ -775,7 +738,7 @@ async function main() {
 
   const [cmd, ...rest] = positional;
   if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") {
-    console.log("usage: ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij] [--wait <sec>] [--no-wait] | ~/inference.mjs list|kill|kill-son|kill-all|last|son-last [--wait <sec>] [--no-wait] | ~/inference.mjs comfy [--no-wait] [ComfyUI args...] | ~/inference.mjs comfy-kill");
+    console.log("usage: ~/inference.mjs <profile> [--dry-run] [--launcher ghostty|zellij] [--wait <sec>] [--no-wait] | ~/inference.mjs list|kill|kill-son|kill-ocr|kill-vision|kill-all|last|son-last|ocr-last [--wait <sec>] [--no-wait] | ~/inference.mjs comfy [--no-wait] [ComfyUI args...] | ~/inference.mjs comfy-kill");
     listProfiles(cfg);
     process.exit(cmd ? 0 : 1);
   }
@@ -783,7 +746,7 @@ async function main() {
     listProfiles(cfg);
     return;
   }
-  if (cmd === "kill" || cmd === "kill-son" || cmd === "kill-all") {
+  if (cmd === "kill" || cmd === "kill-son" || cmd === "kill-ocr" || cmd === "kill-vision" || cmd === "kill-all") {
     if (rest.length) {
       console.error(`error: unexpected extra argument: ${rest.join(" ")}`);
       process.exit(1);
@@ -792,6 +755,8 @@ async function main() {
     // stops the :1237 System One slot, `kill-all` frees the whole GPU.
     if (cmd === "kill") await killServer(cfg, "llm");
     else if (cmd === "kill-son") await killServer(cfg, "systemone");
+    else if (cmd === "kill-ocr") await killServer(cfg, "ocr");
+    else if (cmd === "kill-vision") await killServer(cfg, "vision");
     else await killServer(cfg);
     return;
   }
@@ -799,12 +764,12 @@ async function main() {
     await comfyCommand(cfg, cmd, rest, { dryRun, noWait, waitMs });
     return;
   }
-  if (cmd === "last" || cmd === "son-last") {
+  if (cmd === "last" || cmd === "son-last" || cmd === "ocr-last") {
     if (rest.length) {
       console.error(`error: unexpected extra argument: ${rest.join(" ")}`);
       process.exit(1);
     }
-    const key = cmd === "son-last" ? "last_systemone" : "last_profile";
+    const key = cmd === "ocr-last" ? "last_ocr" : cmd === "son-last" ? "last_systemone" : "last_profile";
     const last = cfg[key];
     if (!last || !cfg.models[last]) {
       console.error(`error: no ${key} recorded yet (launch a ${cmd === "son-last" ? "systemone" : "<profile>"} first).`);
@@ -831,7 +796,7 @@ async function main() {
   const slot = slotFor(cfg.models[cmd]);
   const existing = readLock(cfg, slot);
   const livePids = pidsOfServer(slot);
-  const stopHint = slot === "systemone" ? "~/inference.mjs kill-son" : "~/inference.mjs kill";
+  const stopHint = slot === "vision" ? "~/inference.mjs kill-vision" : slot === "ocr" ? "~/inference.mjs kill-ocr" : slot === "systemone" ? "~/inference.mjs kill-son" : "~/inference.mjs kill";
   if (existing && occupancyAlive(existing)) {
     const elapsed = fmtElapsed(Date.now() - (existing.startedAt ?? Date.now()));
     console.error(
@@ -942,7 +907,7 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
     console.log(viewBody.trimEnd());
     if (launcher === "zellij") {
       console.log(`[dry-run] --- zellij invocation ---`);
-      console.log(`[dry-run] zellij ${buildZellijArgv(cfg, name, viewPath).map(shQuote).join(" ")}`);
+      console.log(`[dry-run] reuse/create ${slot} pane in the current tab; replace only this group’s log pane`);
     } else {
       const ghosttyBin = cfg.ghostty ?? "ghostty";
       console.log(`[dry-run] --- ghostty invocation ---`);
@@ -965,13 +930,8 @@ async function launchProfile(cfg, name, { launcher, dryRun, noWait, waitMs }) {
 
   updateConsumerConfigs(cfg, name, cfg.models[name], false);
 
-  if (launcher === "zellij") {
-    // Reuse: close stale inference panes first so relaunches replace the
-    // existing pane instead of stacking a new one each time.
-    const session = cfg.zellij?.session ?? process.env.ZELLIJ_SESSION_NAME;
-    closePanes(cfg, session, findInferencePanes(cfg, session));
-    launchZellij(cfg, name, viewPath);
-  } else launchGhostty(cfg, viewPath, name);
+  if (launcher === "zellij") launchGroupedView(cfg, slot, name, viewPath);
+  else launchGhostty(cfg, viewPath, name);
 
   const monitorPid = launchMonitor(scriptPath, llamaLog);
   if (!monitorPid) {
@@ -1027,20 +987,6 @@ function buildGhosttyArgv(cfg, scriptPath) {
   return argv;
 }
 
-function buildZellijArgv(cfg, serverAlias, scriptPath) {
-  const z = cfg.zellij ?? {};
-  const argv = [];
-  const session = z.session ?? process.env.ZELLIJ_SESSION_NAME;
-  if (session) argv.push("--session", String(session));
-  argv.push("action", "new-pane", "--name", String(serverAlias));
-  if (z.direction) argv.push("--direction", String(z.direction));
-  if (z.focus !== true) argv.push("--no-focus"); // default: mari keeps focus
-  // no --close-on-exit: like ghostty's wait_after_exit, the pane stays open
-  // after exit so crash output stays readable
-  argv.push("--", scriptPath);
-  return argv;
-}
-
 function launchGhostty(cfg, scriptPath, serverAlias) {
   if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
     console.error("error: no DISPLAY or WAYLAND_DISPLAY — ghostty needs a graphical session");
@@ -1058,30 +1004,5 @@ function launchGhostty(cfg, scriptPath, serverAlias) {
   console.log(`logs for 'llama-server:${serverAlias}' in a new Ghostty window (tail -F).`);
 }
 
-function launchZellij(cfg, serverAlias, scriptPath) {
-  const session = cfg.zellij?.session ?? process.env.ZELLIJ_SESSION_NAME;
-  if (!session && !process.env.ZELLIJ) {
-    console.error("error: zellij launcher needs a target session — run inside zellij or set zellij.session in config.yaml");
-    process.exit(1);
-  }
-  if (typeof Bun.which === "function" && !Bun.which("zellij")) {
-    console.error("error: zellij binary not found on PATH");
-    process.exit(1);
-  }
-  const argv = buildZellijArgv(cfg, serverAlias, scriptPath);
-  console.log(`launch: zellij ${argv.map(shQuote).join(" ")}`);
-  const r = spawnSync("zellij", argv, { encoding: "utf8" });
-  if (r.error) {
-    console.error(`error: failed to spawn zellij: ${r.error.message}`);
-    process.exit(1);
-  }
-  if (r.status !== 0) {
-    console.error(`error: zellij exited with status ${r.status}`);
-    if (r.stderr) console.error(r.stderr.trimEnd());
-    process.exit(1);
-  }
-  const paneId = (r.stdout ?? "").trim();
-  console.log(`logs for 'llama-server:${serverAlias}' in pane ${paneId || "(see zellij)"} (tail -F).`);
-}
 
 await main();

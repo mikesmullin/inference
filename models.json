@@ -24,10 +24,9 @@
           "name": "Qwen 3.8 27B local",
           "reasoning": true,
           "input": [
-            "text",
-            "image"
+            "text"
           ],
-          "contextWindow": 262144,
+          "contextWindow": 524288,
           "maxTokens": 32000,
           "thinkingLevelMap": {
             "off": "off",
