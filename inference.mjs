@@ -688,9 +688,6 @@ function updateConsumerConfigs(cfg, name, m, dryRun) {
         console.warn(`warning: llama-server/default not found in ${piPath}, leaving pi models unchanged`);
       } else {
         row.contextWindow = ctx;
-        // Explicit per-preset modality override; infer legacy vision presets too.
-        const args = (m.args ?? []).flat();
-        row.input = m.input_modalities ?? ((m.mmproj || args.includes("--vision")) ? ["text", "image"] : ["text"]);
         if (!dryRun) writeFileSync(piPath, JSON.stringify(pi, null, 2) + "\n");
         console.log(`pi llama-server/default contextWindow ${dryRun ? "would become" : "set to"}: ${ctx}`);
       }

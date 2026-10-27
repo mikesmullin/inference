@@ -40,8 +40,6 @@ sys.path.insert(0, str(STRATA_ROOT))
 
 argv = sys.argv[1:]
 alias, out = None, []
-text_only = "--text-only" in argv
-argv = [a for a in argv if a != "--text-only"]
 i = 0
 while i < len(argv):
     if argv[i] == "--model-id" and i + 1 < len(argv):
@@ -57,11 +55,8 @@ if alias:
         if a == "--config" and j + 1 < len(out):
             src = Path(out[j + 1])
             cfg = json.loads(src.read_text(encoding="utf-8-sig"))  # setup.py may leave a BOM
-            if cfg.get("model_name") != alias or text_only:
+            if cfg.get("model_name") != alias:
                 cfg["model_name"] = alias
-                if text_only:
-                    cfg.pop("vision", None)
-                    cfg["args"] = [a for a in cfg.get("args", []) if a != "--vision"]
                 SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
                 dst = SCRIPT_DIR / f"strata-served-{src.stem}.json"
                 dst.write_text(json.dumps(cfg, indent=1), encoding="utf-8")

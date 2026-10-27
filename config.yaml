@@ -157,7 +157,6 @@ models:
   qwen3.6-35b-a3b-ninfer:
     server_bin: /workspace/tmp/ninfer/vendor/ninfer/build/apps/ninfer-serve
     server_process: ninfer-serve
-    input_modalities: [text]
     context_window: 262144
     artifact: /workspace/tmp/ninfer/models/qwen3_6_35b_a3b.ninfer
     args:
@@ -179,6 +178,7 @@ models:
       - [--min-p, 0]
       - [--presence-penalty, 1.0]
       - [--frequency-penalty, 0]
+      - --vision
 
   # mari hotkey b — Ternary Bonsai 2 27B via the iamwavecut/ninfer-all fork.
   # (The llama-GGUF preset was retired: 120 tok/s vs 420-590 here, and its
@@ -195,7 +195,6 @@ models:
   ternary-bonsai-2-ninfer:
     server_bin: /workspace/tmp/ninfer/vendor/ninfer-all/build/apps/ninfer-serve
     server_process: ninfer-serve
-    input_modalities: [text]
     context_window: 524288
     artifact: /workspace/tmp/ninfer/models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer
     args:
@@ -220,6 +219,7 @@ models:
       # dropped for simplicity (file kept at vendor/ninfer-all/).
       - [--spec, dflash2]
       - [--draft-tokens, 7]
+      - --vision
       # STEP H — medium default effort + 2048 thinking-token budget.
       # Effort label alone proved cosmetic (default path still burned 1024
       # reasoning vs 273 for explicit per-request medium); the budget is the
@@ -419,16 +419,12 @@ models:
   # sysctl today; without it the 40 GiB arena falls back to 4 KB pages) —
   # without the pool the engine still runs, just slower on expert streams.
   # Backups: /tmp/strata-iq3_xxs.131k-backup.json, /tmp/calib-262k-q4.out.
-  # 2026-10-25: --text-only strips vision from the derived runtime config,
-  # overriding the historical CPU-vision setup above even after setup regenerates it.
   qwen3.8-flash-next-strata-iq3xxs:
     server_bin: /workspace/tmp/strata/.venv/bin/strata-serve
     server_process: strata-serve
-    input_modalities: [text]
     context_window: 262144
     artifact: ~/.config/inference/strata-serve.py
     args:
-      - --text-only
       - [--config, /workspace/tmp/strata/strata-iq3_xxs.json]
       - [--host, 127.0.0.1]
       - [--port, 1234]
