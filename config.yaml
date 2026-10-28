@@ -147,40 +147,6 @@ models:
       - [--flash-attn, "on"]
       - --no-mmap
 
-  # Recursive Flint NVFP4 (official 22.9 GB QAT GGUF) with q4_0 KV at 512K.
-  # VRAM: 22.9 weights + 512K x ~7 KB q4 KV (~3.5 GB) + buffers ~= 27 GB, so
-  # the voice stack can stay. Needs the master llama-server build below: the
-  # system build (10819) predates Flint support (llama.cpp PR #30928), and so
-  # does every LM Studio backend on this box.
-  # Q4 KV is an EXPERIMENT: Flint's KV is narrow GQA-4 and 512K is past the
-  # 262K trained window — needle-test (100K/262K/512K, f16 vs q8 vs q4)
-  # before trusting it for agent work. The conservative sibling is an NVFP4
-  # twin at -c 262144 with q8_0 KV (~27 GB, native window, near-zero risk).
-  # Sampling is the release's own generation config. Launching syncs the
-  # :1234 consumers (AGL + pi) up to a 524288 window.
-  flint-nvfp4-q4kv-512k:
-    context_window: 524288
-    server_bin: /workspace/tmp/llama.cpp-flint/llama.cpp/build/bin/llama-server
-    model: ~/.lmstudio/models/RecursiveSI/flint-nvfp4-gguf/flint-nvfp4.gguf
-    args:
-      - [-ngl, 99]
-      - [-c, 524288]
-      - [-ctk, q4_0]
-      - [-ctv, q4_0]
-      - [-b, 2048]
-      - [-ub, 512]
-      - [--host, 127.0.0.1]
-      - [--port, 1234]
-      - --jinja
-      - [--temp, 1.0]
-      - [--top-p, 0.95]
-      - [--top-k, 20]
-      - --kv-unified
-      - [-t, 12]
-      - [-np, 1]
-      - [--flash-attn, "on"]
-      - [-lm, none]
-
   # mari hotkey n — NInfer (ninfer-serve, NOT llama-server) with MTP3 speculative
   # decode. Same 262144-token context as the llama presets, INT8 KV, published
   # Structured-decode rate ~780 tok/s. Served on :1234 behind the same
@@ -213,40 +179,6 @@ models:
       - [--presence-penalty, 1.0]
       - [--frequency-penalty, 0]
       - --vision
-
-  # Recursive Flint 40B-A2.5B MoE via the iamwavecut/ninfer-all fork
-  # (needs a build from e1f2d961 on; stock NInfer refuses the file).
-  # WaveCut/Flint-UD-Q4_K_XL-NInfer-v3 repacks Unsloth's UD-Q4_K_XL GGUF byte
-  # for byte (25.1 GB). Published RTX 5090 bench vs llama.cpp on the same
-  # GGUF: prefill 15,670 tok/s, decode 347.7 tok/s (314.6 after a 10k prompt)
-  # vs llama.cpp's 222.7/209.2 — the 300+ tok/s repro target.
-  # VRAM (measured 2026-10-28, ~3 GB held by voice/display): 23.4 GiB weights
-  # leaves ~6.0 GB free; 4x64K lanes need 7.7 GB KV + 0.5 workspace -> refused
-  # at startup. 2x64K lanes need ~4.4 GB total: fits with ~1.6 GB margin.
-  # No --kv-dtype (F16 cache only), no --spec/--draft-tokens (Recursive
-  # publishes no draft model; --lookup-ngram 4 measured 335 -> 378 tok/s on a
-  # greedy code rewrite with identical output — add it if plain decode falls
-  # short), no --vision (text only), no --rope-yarn (64K < 262K native, and
-  # the full-attention blocks have no positions to scale).
-  # Sampling flags are the release's own defaults (temp 1.0 / top-p 0.95 /
-  # top-k 20); the server applies them when a request omits them.
-  # Launching syncs the :1234 consumers (AGL + pi) down to a 65536 window.
-  flint-ud-q4kxl-ninfer:
-    server_bin: /workspace/tmp/ninfer/vendor/ninfer-all/build/apps/ninfer-serve
-    server_process: ninfer-serve
-    context_window: 65536
-    artifact: /workspace/tmp/ninfer/models/flint-UD-Q4_K_XL-ninfer-v3.ninfer
-    args:
-      - [--host, 127.0.0.1]
-      - [--port, 1234]
-      - [--max-context, 65536]
-      - [--max-concurrency, 2]
-      - [--max-pending-requests, 1]
-      - [--prefill-chunk, 1024]
-      - [--device, 0]
-      - [--temperature, 1.0]
-      - [--top-p, 0.95]
-      - [--top-k, 20]
 
   # mari hotkey b — Ternary Bonsai 2 27B via the iamwavecut/ninfer-all fork.
   # (The llama-GGUF preset was retired: 120 tok/s vs 420-590 here, and its
