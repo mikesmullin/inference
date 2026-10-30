@@ -153,7 +153,7 @@ models:
   # llama-server AGL endpoint name, so agents keep working unchanged.
   # Needs ~26 GiB free VRAM at startup; stop other servers first (the launcher
   # does that automatically). --vision loads the artifact's Vision weights for
-  # image/video input (--kv-capacity auto shrinks text KV to make room).
+  # image/video input (kv pool capped at --kv-capacity, not auto).
   qwen3.6-35b-a3b-ninfer:
     server_bin: /workspace/tmp/ninfer/vendor/ninfer/build/apps/ninfer-serve
     server_process: ninfer-serve
@@ -163,8 +163,8 @@ models:
       - [--host, 127.0.0.1]
       - [--port, 1234]
       - [--max-context, 262144]
-      - [--kv-capacity, auto]
-      - [--max-concurrency, 8]
+      - [--kv-capacity, 262144]
+      - [--max-concurrency, 1]
       - [--max-pending-requests, 7]
       - [--prefill-chunk, 1024]
       - [--device, 0]
@@ -201,9 +201,9 @@ models:
       - [--host, 127.0.0.1]
       - [--port, 1234]
       - [--max-context, 524288]
-      - [--kv-capacity, auto]
-      - [--max-concurrency, 1]
-      - [--max-pending-requests, 1]
+      - [--kv-capacity, 524288]
+      - [--max-concurrency, 8]
+      - [--max-pending-requests, 7]
       - [--prefill-chunk, 1024]
       - [--device, 0]
       - [--kv-dtype, rk4v4]
@@ -241,7 +241,6 @@ models:
       - [--host, 127.0.0.1]
       - [--port, 1234]
       - [--max-context, 262144]
-      - [--kv-capacity, auto]
       - [--max-concurrency, 1]
       - [--max-pending-requests, 1]
       - [--prefill-chunk, 1024]
@@ -269,7 +268,6 @@ models:
       - [--host, 127.0.0.1]
       - [--port, 1234]
       - [--max-context, 249856]
-      - [--kv-capacity, auto]
       - [--max-concurrency, 1]
       - [--max-pending-requests, 1]
       - [--prefill-chunk, 1024]
@@ -527,7 +525,7 @@ models:
       - [--repeat-penalty, 1.05]
 
 
-last_profile: qwen3.6-35b-a3b-ninfer
+last_profile: ternary-bonsai-2-ninfer
 last_systemone: h2o-lightning-4b
 last_ocr: paddleocr
 last_vision: liquid-450m
