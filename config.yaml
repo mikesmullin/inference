@@ -164,7 +164,7 @@ models:
       - [--port, 1234]
       - [--max-context, 262144]
       - [--kv-capacity, 262144]
-      - [--max-concurrency, 1]
+      - [--max-concurrency, 2]
       - [--max-pending-requests, 7]
       - [--prefill-chunk, 1024]
       - [--device, 0]
@@ -202,7 +202,7 @@ models:
       - [--port, 1234]
       - [--max-context, 524288]
       - [--kv-capacity, 524288]
-      - [--max-concurrency, 8]
+      - [--max-concurrency, 2]
       - [--max-pending-requests, 7]
       - [--prefill-chunk, 1024]
       - [--device, 0]
@@ -472,6 +472,11 @@ models:
       - [--host, 127.0.0.1]
       - [--port, 1237]
       - [--threads, 4]
+      # vector-DB embeddings via llama.cpp native endpoint (already in VRAM):
+      # one L2-normalized vector per input, so OpenAI clients get a single
+      # embedding per document instead of a per-token list
+      - [--embeddings]
+      - [--pooling, last]
 
   # mari hotkey l — Laya (421M ModernBERT System One decision model) on the
   # :1237 slot, a single in-process worker (~4.2 GB VRAM; 2 workers ~7.3 GB,
