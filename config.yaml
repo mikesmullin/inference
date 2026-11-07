@@ -453,15 +453,16 @@ models:
   # mari hotkey l — H2O-Lightning-4B via llama.cpp's native /v1/systemone API.
   # The :1237 System One slot coexists with the :1234 text slot; launching
   # this only replaces the previous :1237 occupant. mail1 uses SYSTEMONE_URL.
-  # Q8_0 text-only used ~5.2 GiB VRAM; vision adds the 0.63 GiB F16 projector
-  # plus runtime buffers (total with vision still to be measured).
+  # Q4_K_M text-only uses ~2.5 GiB VRAM (vs ~5.2 for Q8_0); vision adds the
+  # 0.63 GiB F16 projector plus runtime buffers. (Was Q8_0; swap back with
+  # git checkout on this file after the A/B.)
   # mmproj enables image decisions; 1024 image tokens is the model card's
   # validated budget. Keep one slot for stable per-option probabilities.
   h2o-lightning-4b:
     slot: systemone
     server_bin: /workspace/tmp/llama.cpp-h2o-lightning/build/bin/llama-server
     server_process: llama-server
-    model: /workspace/tmp/llama.cpp-h2o-lightning/models/h2o/h2o-lightning-4b-Q8_0.gguf
+    model: /workspace/tmp/llama.cpp-h2o-lightning/models/h2o/h2o-lightning-4b-Q4_K_M.gguf
     mmproj: /workspace/tmp/llama.cpp-h2o-lightning/models/h2o/mmproj-lightning-f16.gguf
     context_window: 8192
     args:
