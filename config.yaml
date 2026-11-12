@@ -453,16 +453,15 @@ models:
   # mari hotkey l — H2O-Lightning-4B via llama.cpp's native /v1/systemone API.
   # The :1237 System One slot coexists with the :1234 text slot; launching
   # this only replaces the previous :1237 occupant. mail1 uses SYSTEMONE_URL.
-  # Q4_K_M text-only uses ~2.5 GiB VRAM (vs ~5.2 for Q8_0); vision adds the
-  # 0.63 GiB F16 projector plus runtime buffers. (Was Q8_0; swap back with
-  # git checkout on this file after the A/B.)
+  # Q8_0 text-only used ~5.2 GiB VRAM; vision adds the 0.63 GiB F16 projector
+  # plus runtime buffers (total with vision still to be measured).
   # mmproj enables image decisions; 1024 image tokens is the model card's
   # validated budget. Keep one slot for stable per-option probabilities.
   h2o-lightning-4b:
     slot: systemone
     server_bin: /workspace/tmp/llama.cpp-h2o-lightning/build/bin/llama-server
     server_process: llama-server
-    model: /workspace/tmp/llama.cpp-h2o-lightning/models/h2o/h2o-lightning-4b-Q4_K_M.gguf
+    model: /workspace/tmp/llama.cpp-h2o-lightning/models/h2o/h2o-lightning-4b-Q8_0.gguf
     mmproj: /workspace/tmp/llama.cpp-h2o-lightning/models/h2o/mmproj-lightning-f16.gguf
     context_window: 8192
     args:
@@ -530,6 +529,46 @@ models:
       - [--image-max-tokens, 256]
       - [--repeat-penalty, 1.05]
 
+
+  # mari hotkey t — Qwen3.8-27B via TensorFold 1.2.6 (tf-serve/tensorfold-native,
+  # NOT llama-server): MLX affine-4 weights plus the DFlash2 drafter. This is the
+  # measured best of 4 formats x 3 drafters on this 5090 — 931 tok/s aggregate
+  # across 9 streams, 378-459 tok/s single stream, and every drafted reply is
+  # byte-identical to the same request with drafts off (exact_mode "exact").
+  # Full numbers: /workspace/tmp/fireworks/tmp/HANDOFF_QWEN27_PHASE3.md
+  #
+  # shim: server_bin is bin/tensorfold-serve, which inserts TensorFold's `serve`
+  # subcommand, rewrites inference.mjs's --model-id into --name, exports HF_HOME
+  # (--drafter names a HF repo id resolved from ~/.lmstudio/tensorfold-hf), and
+  # execs bin/tf-serve — a symlink to tensorfold-native, so /proc/<pid>/comm is
+  # `tf-serve` for pgrep/kill rather than a truncated "tensorfold-nati".
+  # `artifact` is the pinned MLX-4bit snapshot, not the repo id, because
+  # inference.mjs stats it before launch.
+  #
+  # Sampling is left at TensorFold's own serve defaults (temperature 1.0,
+  # top_k 20, top_p 0.95) rather than pinned here.
+  qwen3.8-27b-tensorfold-dflash2:
+    server_bin: ~/.config/inference/bin/tensorfold-serve
+    server_process: tf-serve
+    context_window: 262144
+    artifact: ~/.lmstudio/tensorfold-hf/hub/models--TensorFold--Qwen3.8-27B-MLX-4bit/snapshots/22d8d538154e0e5b6f8dcb1fcc74a60a0798104c
+    args:
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      # Measured on this card: a 262,144-token window costs 9.09 GiB of fp8 KV
+      # for ONE stream (16.06 model + 9.09 + 1.0 reserve = 26.15 of 31.8 GiB),
+      # so the full window and concurrency are mutually exclusive here. A
+      # harness conversation wants the window, not nine shallow streams.
+      # Others that also fit: --parallel 2 --context 131072,
+      # --parallel 4 --context 65536, --parallel 6 --context 32768.
+      # The window costs memory, not speed: a shallow request still decodes at
+      # ~540 tok/s with the 262k window open.
+      - [--parallel, 1]
+      - [--context, 262144]
+      - [--kv-cache, fp8]
+      - [--drafter, z-lab/Qwen3.8-27B-DFlash2]
+      - --no-thinking
+      - --no-update-check
 
 last_profile: ternary-bonsai-2-ninfer
 last_systemone: h2o-lightning-4b

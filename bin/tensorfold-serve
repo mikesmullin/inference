@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Adapter so inference.mjs can launch a TensorFold server.
+#
+# inference.mjs builds non-llama backends as
+#
+#     <server_bin> <artifact> --model-id <alias> [args...]
+#
+# (see the `qwen3.6-35b-a3b-ninfer` profile). TensorFold instead wants
+#
+#     tensorfold serve <checkpoint> --name <alias> [args...]
+#
+# so this wrapper stands in as `server_bin`, takes the checkpoint directory as
+# `artifact`, and reconciles the two:
+#
+#   * inserts the `serve` subcommand, which has no place in inference.mjs's
+#     argv shape;
+#   * rewrites --model-id <alias> to --name <alias>, so GET /v1/models reports
+#     `default` like every other profile on the :1234 slot;
+#   * exports HF_HOME, because --drafter names a Hugging Face repo id that the
+#     engine resolves through the cache (weights live under the LM Studio
+#     folder, not ~/.cache/huggingface);
+#   * execs bin/tf-serve, a symlink to tensorfold-native, so the process this
+#     wrapper is replaced by is named `tf-serve` for pgrep/kill tracking
+#     (`server_process: tf-serve`) rather than a bare bash or a comm-truncated
+#     "tensorfold-nati".
+set -euo pipefail
+
+export HF_HOME="${HF_HOME:-$HOME/.lmstudio/tensorfold-hf}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: tensorfold-serve <checkpoint-dir> [--model-id ALIAS] [flags...]" >&2
+  exit 2
+fi
+
+CHECKPOINT=$1; shift
+
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model-id) args+=(--name "${2:?--model-id needs a value}"); shift 2 ;;
+    --model-id=*) args+=(--name "${1#*=}"); shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+exec "$HOME/.config/inference/bin/tf-serve" serve "$CHECKPOINT" "${args[@]}"

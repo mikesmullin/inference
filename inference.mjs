@@ -103,7 +103,7 @@ function pidsOfServer(slot) {
   // Classify by actual argv so stopping text does not kill a resident H2O model.
   const candidates=new Set();
   for(const args of [
-    ["-x","(llama-server|ninfer-serve|strata-serve|h2o-serve|vllm|laya-serve|paddle-ocr)"],
+    ["-x","(llama-server|ninfer-serve|strata-serve|h2o-serve|vllm|laya-serve|paddle-ocr|tf-serve)"],
     ["-f","h2o_lightning_shim"],
   ]) {
     const r=spawnSync("pgrep",args,{encoding:"utf8"});
