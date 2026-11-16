@@ -196,7 +196,7 @@ models:
   # the new competitor to test; needs far less VRAM and a dedicated 32K
   # window, so it only ever shares the :1234 slot one profile at a time.)
   boole-32b-a2.5b-preview:
-    context_window: 32768
+    context_window: 262144
     server_bin: /workspace/models/boole/bin/boole-llama-server
     server_process: llama-server
     model: /workspace/models/boole/model/Boole-32B-A2.5B-Preview-Q2_0.gguf
@@ -205,7 +205,7 @@ models:
       - -fa
       - "on"
       - [-ub, 1024]
-      - [-c, 32768]
+      - [-c, 262144]
       - --jinja
       - [--host, 127.0.0.1]
       - [--port, 1234]
@@ -619,7 +619,7 @@ models:
       - [--draft-tokens, 7]
       - --rope-yarn
 
-last_profile: ternary-bonsai-2-ninfer
+last_profile: boole-32b-a2.5b-preview
 last_systemone: h2o-lightning-4b
 last_ocr: paddleocr
 last_vision: liquid-450m
