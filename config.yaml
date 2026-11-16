@@ -619,7 +619,7 @@ models:
       - [--draft-tokens, 7]
       - --rope-yarn
 
-last_profile: boole-32b-a2.5b-preview
+last_profile: qwen3.6-35b-a3b-ninfer
 last_systemone: h2o-lightning-4b
 last_ocr: paddleocr
 last_vision: liquid-450m
