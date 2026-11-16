@@ -180,6 +180,36 @@ models:
       - [--frequency-penalty, 0]
       - --vision
 
+  # mari hotkey m — Boole-32B-A2.5B-Preview (Flint-based 32B / 2.5B-active
+  # MoE, ~1.8 bits/weight avg): per-expert mixed-precision GGUF (routed
+  # experts 1-2-bit, the rest 4-bit) that stock llama.cpp cannot decode.
+  # Runs on the PrecisionNumerics llama.cpp fork (upstream + custom CUDA MoE
+  # expert kernels), pinned at commit 7b225ec and built at
+  # /workspace/models/boole/llama.cpp. Q2_0 GGUF (8.96 GB) at
+  # /workspace/models/boole/model/. Wrapper /workspace/models/boole/bin/
+  # boole-llama-server sets GGML_CUDA_GRAPH_OPT=1 (per the model card's
+  # quick start) and execs the fork's llama-server, keeping process comm
+  # `llama-server` for slot/lock/pgrep tracking.
+  # Card: CUDA GPU required, ~10.8 GB VRAM @ 32K context. The model reasons
+  # before it answers and returns the reasoning separately from the reply.
+  # (vs hotkey n = qwen3.6-35b-a3b-ninfer at ~780 tok/s structured: this is
+  # the new competitor to test; needs far less VRAM and a dedicated 32K
+  # window, so it only ever shares the :1234 slot one profile at a time.)
+  boole-32b-a2.5b-preview:
+    context_window: 32768
+    server_bin: /workspace/models/boole/bin/boole-llama-server
+    server_process: llama-server
+    model: /workspace/models/boole/model/Boole-32B-A2.5B-Preview-Q2_0.gguf
+    args:
+      - [-ngl, 99]
+      - -fa
+      - "on"
+      - [-ub, 1024]
+      - [-c, 32768]
+      - --jinja
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+
   # mari hotkey b — Ternary Bonsai 2 27B via the iamwavecut/ninfer-all fork.
   # (The llama-GGUF preset was retired: 120 tok/s vs 420-590 here, and its
   # 7.5 GB of files + fork binary were removed.)
@@ -569,6 +599,25 @@ models:
       - [--drafter, z-lab/Qwen3.8-27B-DFlash2]
       - --no-thinking
       - --no-update-check
+
+  # Fireworks engine MVP (concept-27b-engine branch): ConceptCountry NVFP4 +
+  # DFlash2 taps + Q4 KV + YaRN. Serves :1234 contract via
+  # bin/fireworks-serve (copy of fireworks target/debug/fireworks-serve).
+  # MVP returns stub text; full 64-layer decode is next. Validate:
+  #   ~/inference.mjs qwen-concept-27b-fireworks --dry-run
+  qwen-concept-27b-fireworks:
+    server_bin: ~/.config/inference/bin/fireworks-serve
+    server_process: fireworks-serve
+    context_window: 262144
+    artifact: ~/.lmstudio/models/ConceptCountry/qwen-concept-27b-nvfp4a16
+    args:
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - [--context, 262144]
+      - [--kv-dtype, q4]
+      - [--spec, dflash2]
+      - [--draft-tokens, 7]
+      - --rope-yarn
 
 last_profile: ternary-bonsai-2-ninfer
 last_systemone: h2o-lightning-4b
