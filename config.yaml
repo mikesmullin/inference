@@ -123,6 +123,44 @@ models:
       - [--flash-attn, "on"]
       - --no-mmap
 
+  # mari hotkey Q — Qwen3.8-27B GGUF Q4_K_M on llama.cpp v1.0.0 (b1b770d), the
+  # unsloth Dynamic V3.1 UD build (12 GB class, ~7-10% higher accuracy per
+  # Unsloth) per the v1.0.0 quickstart. Built-in MTP/NextN lives in the main
+  # head (GGUF metadata qwen35.nextn_predict_layers=1) + q4_0 KV cache (v1.0.0
+  # blog / SuSu_酥酥 post: ~74 -> ~134 tok/s on RTX 5090; was f8_e4m3, switched
+  # to q4_0). MMProj kept for images.
+  qwen3.8-27b-gguf-q4-k-m:
+    server_bin: /workspace/tmp/llama.cpp-1.0.0/build/bin/llama-server
+    server_process: llama-server
+    context_window: 262144
+    model: ~/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf
+    mmproj: ~/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/mmproj-Qwen3.8-27B-BF16.gguf
+    args:
+      - [--spec-type, draft-mtp]
+      - [-ngl, 99]
+      - [-c, 262144]
+      - [-ctk, q4_0]
+      - [-ctv, q4_0]
+      - [-b, 2048]
+      - [-ub, 512]
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - --jinja
+      - [--reasoning-effort, low]
+      - --kv-unified
+      - [-t, 12]
+      - [-np, 1]
+      - [--flash-attn, "on"]
+      - [--load-mode, none]
+
+  # nvidia draft head (nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft, HuggingPapers
+  # tweet) is NOT directly usable in this profile: it is a full 4.21B *safetensors*
+  # LM (Qwen3.5-4B hybrid) for vLLM's nvdraft path (the official runtime) —
+  # llama.cpp v1.0.0 spec types (draft-mtp/dflash/eagle3/dspark) need a
+  # built-in head or a dflash/eagle3-format GGUF, not a standard 4B LM.
+  # See the Q comment in ai.yml for the two ways to try it.
+  # (No hotkey.)
+
   # ex mari hotkey n — no draft model (hotkey n now runs qwen3.6-35b-a3b-ninfer)
   muse-glimmer:
     context_window: 262144
@@ -589,7 +627,7 @@ models:
       - [--draft-tokens, 7]
       - --rope-yarn
 
-last_profile: qwen3.6-35b-a3b-ninfer
+last_profile: qwen3.8-27b-gguf-q4-k-m
 last_systemone: h2o-lightning-4b
 last_ocr: paddleocr
 last_vision: liquid-450m
