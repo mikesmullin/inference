@@ -162,6 +162,37 @@ models:
   # (No hotkey.)
 
   # ex mari hotkey n — no draft model (hotkey n now runs qwen3.6-35b-a3b-ninfer)
+  # (No hotkey for the nvidia safetensors draft here; see Q.)
+
+  # mari hotkey Q — Niklas-measured recipe on official TensorFold 1.2.9:
+  # MLX 4-bit @22d8d538 + z-lab DFlash2 @50307d4c, FP8 KV, int8 prompts,
+  # vision on, 262144 ctx, 1 stream (--parallel auto settles to one at the
+  # full window), card sampling (temp 0.7/top_p 0.8/top_k 20/presence 1.5),
+  # thinking budget 49152. Measured: 268 tok/s code, 239 prose, 27.3 GiB.
+  # On this box (2026-11-18): 226 tok/s.
+  # (--kv-cache/--vision/--prompt-precision are hidden flags in 1.2.9's
+  # usage text but accepted; q4 KV does not exist — bf16|fp8 only.)
+  # Needs the GPU free (~27 GB).
+  qwen3.8-27b-tensorfold-129:
+    server_bin: ~/.config/inference/bin/tensorfold-serve-129
+    server_process: tf-serve-129
+    context_window: 262144
+    artifact: ~/.lmstudio/tensorfold-hf/hub/models--TensorFold--Qwen3.8-27B-MLX-4bit/snapshots/22d8d538154e0e5b6f8dcb1fcc74a60a0798104c
+    args:
+      - [--parallel, auto]
+      - [--context, 262144]
+      - [--drafter, z-lab/Qwen3.8-27B-DFlash2]
+      - [--drafter-bits, 4]
+      - [--kv-cache, fp8]
+      - [--prompt-precision, int8]
+      - --vision
+      - [--instruct-sampling, card]
+      - [--thinking-budget, 49152]
+      - [--max-tokens, 65536]
+      - [--prompt-cache-gib, 8]
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - --no-update-check
   muse-glimmer:
     context_window: 262144
     model: ~/.lmstudio/models/lmstudio-community/Muse-Glimmer-30B-GGUF/muse-glimmer-30B-kquant-17gb.gguf
@@ -627,7 +658,7 @@ models:
       - [--draft-tokens, 7]
       - --rope-yarn
 
-last_profile: qwen3.8-27b-gguf-q4-k-m
+last_profile: qwen3.8-27b-tensorfold-129
 last_systemone: h2o-lightning-4b
 last_ocr: paddleocr
 last_vision: liquid-450m

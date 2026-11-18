@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Adapter so inference.mjs can launch official TensorFold 1.2.9 for the
+# Niklas-measured Qwen3.8-27B recipe (MLX 4-bit + DFlash2, FP8 KV, vision).
+# Same contract as bin/tensorfold-serve (inference.mjs builds non-llama
+# backends as `<server_bin> <artifact> --model-id <alias> [args...]`):
+# insert the `serve` subcommand, rewrite --model-id to --name, export
+# HF_HOME so the --drafter repo id resolves through the tensorfold-hf cache,
+# and exec bin/tf-serve-129 (symlink to the 1.2.9 tensorfold-native) so the
+# process is named `tf-serve-129` for pgrep/kill (`server_process`).
+#
+# Recipe env from BobClawblaw/qwen38-27b-vision-rtx-5090 serve.sh:
+# TENSORFOLD_CUDA_KERNELS=native (the engine's own CUDA kernels, no captured
+# glue kernels) and TF_QWEN_KV_PAGES=256 (streams beside the first take
+# 256-position pages of one pool).
+set -euo pipefail
+
+export HF_HOME="${HF_HOME:-$HOME/.lmstudio/tensorfold-hf}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$HOME/.lmstudio/tensorfold-hf/hub}"
+export TENSORFOLD_CUDA_KERNELS="${TENSORFOLD_CUDA_KERNELS:-native}"
+export TF_QWEN_KV_PAGES="${TF_QWEN_KV_PAGES:-256}"
+
+if [ "$#" -lt 1 ]; then
+  echo "usage: tensorfold-serve-129 <checkpoint-dir> [--model-id ALIAS] [flags...]" >&2
+  exit 2
+fi
+
+CHECKPOINT=$1; shift
+
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model-id) args+=(--name "${2:?--model-id needs a value}"); shift 2 ;;
+    --model-id=*) args+=(--name "${1#*=}"); shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+exec "$HOME/.config/inference/bin/tf-serve-129" serve "$CHECKPOINT" "${args[@]}"
