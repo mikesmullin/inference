@@ -48,7 +48,8 @@ zellij:
   # One reusable log pane per slot, placed in whichever tab is currently active.
 
 models:
-  # mari hotkey q — full 256k context
+  # ex mari hotkey q (d now runs daisyrose-27b-tensorfold-129; this profile
+  # stays launchable via ~/inference.mjs) — 256k context, MTP q8 attn
   qwen3.8-27b-nvfp4-mtp-q8attn:
     context_window: 262144
     model: ~/.lmstudio/models/utautako/Qwen3.8-27B-NVFP4-MTP-Q8attn-GGUF/Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf
@@ -123,7 +124,8 @@ models:
       - [--flash-attn, "on"]
       - --no-mmap
 
-  # mari hotkey Q — Qwen3.8-27B GGUF Q4_K_M on llama.cpp v1.0.0 (b1b770d), the
+  # ex mari hotkey Q (disabled in ai.yml, still launchable; q now runs
+  # qwen3.8-27b-tensorfold-129) — Qwen3.8-27B GGUF Q4_K_M on llama.cpp v1.0.0 (b1b770d), the
   # unsloth Dynamic V3.1 UD build (12 GB class, ~7-10% higher accuracy per
   # Unsloth) per the v1.0.0 quickstart. Built-in MTP/NextN lives in the main
   # head (GGUF metadata qwen35.nextn_predict_layers=1) + q4_0 KV cache (v1.0.0
@@ -153,18 +155,53 @@ models:
       - [--flash-attn, "on"]
       - [--load-mode, none]
 
-  # nvidia draft head (nvidia/Qwen3.5-4B-Qwen3.8-27B-Draft, HuggingPapers
-  # tweet) is NOT directly usable in this profile: it is a full 4.21B *safetensors*
-  # LM (Qwen3.5-4B hybrid) for vLLM's nvdraft path (the official runtime) —
-  # llama.cpp v1.0.0 spec types (draft-mtp/dflash/eagle3/dspark) need a
-  # built-in head or a dflash/eagle3-format GGUF, not a standard 4B LM.
-  # See the Q comment in ai.yml for the two ways to try it.
-  # (No hotkey.)
+  # mari hotkey d — DaisyRose-27B on official TensorFold 1.2.9
+  # (validated 2026-11-19). This is the configuration that actually works on
+  # this box:
+  #   * full native 262144 window, KV resident (fp8), loaded in 23 s
+  #   * ~220-260 tok/s on novel prompts with the DFlash2 drafter
+  #     (vs ~74 tok/s on sglang with no speculation)
+  #   * correct output, unlike BOTH sglang speculative paths
+  #
+  # Why TensorFold and not sglang for this checkpoint (all measured):
+  #   - sglang + DSpark v2: garbage after the first token, accept rate 0.00,
+  #     and its 3.64 GB draft held max_total_num_tokens to 43136.
+  #   - sglang + in-checkpoint MTP as EAGLE: also garbage, accept rate 0.00,
+  #     53 tok/s (SLOWER than no drafts), and the MTP draft module costs
+  #     5.53 GB -> pool collapses to 5120 tokens.
+  #   - sglang with no speculation: correct, 344256-token pool, but only
+  #     ~74 tok/s.
+  # TensorFold reads the same modelopt mixed FP8+NVFP4 checkpoint directly
+  # (`tensorfold info` reports: modelopt mixed precision (FP8, NVFP4),
+  # 20.44 GiB, memory floor 22.44 GiB).
+  #
+  # Drafter notes:
+  #   * --mtp-drafts / --mtp-confidence are REFUSED for this family on CUDA
+  #     ("this CUDA family's drafts are not tunable"), so the checkpoint's own
+  #     15 mtp.* tensors cannot be driven explicitly here.
+  #   * with no --drafter it serves "drafts: copies only" -> ~68 tok/s.
+  #   * z-lab/Qwen3.8-27B-DFlash2 at --drafter-bits 4 fits the full window.
+  #   * tencent/Qwen3.8-27B-DSpine-b16 does NOT fit at 262144
+  #     (OutOfDeviceMemory reserving stream caches) - it needs a lower --context.
+  #   * --vision is left off: the box's libturbojpeg is not 3.1.4.1 so JPEG
+  #     inputs are refused anyway, and the tower would eat the KV budget.
+  daisyrose-27b-tensorfold-129:
+    server_bin: ~/.config/inference/bin/tensorfold-serve-129
+    server_process: tf-serve-129
+    context_window: 262144
+    artifact: /workspace/models/DaisyRose-27B-NVFP4
+    args:
+      - [--context, 262144]
+      - [--kv-cache, fp8]
+      - [--prompt-precision, int8]
+      - [--parallel, auto]
+      - [--drafter, z-lab/Qwen3.8-27B-DFlash2]
+      - [--drafter-bits, 4]
+      - [--prompt-cache-gib, 8]
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
 
-  # ex mari hotkey n — no draft model (hotkey n now runs qwen3.6-35b-a3b-ninfer)
-  # (No hotkey for the nvidia safetensors draft here; see Q.)
-
-  # mari hotkey Q — Niklas-measured recipe on official TensorFold 1.2.9:
+  # mari hotkey q — Niklas-measured recipe on official TensorFold 1.2.9:
   # MLX 4-bit @22d8d538 + z-lab DFlash2 @50307d4c, FP8 KV, int8 prompts,
   # vision on, 262144 ctx, 1 stream (--parallel auto settles to one at the
   # full window), card sampling (temp 0.7/top_p 0.8/top_k 20/presence 1.5),
@@ -320,7 +357,8 @@ models:
       - [--draft-tokens, 5]
       - --vision
 
-  # mari hotkey q — Qwen3.8-27B NVFP4 via upstream ninfer, DFlash2 K=7.
+  # ex mari hotkey q (d now runs daisyrose-27b-tensorfold-129) — Qwen3.8-27B NVFP4 via
+  # upstream ninfer, DFlash2 K=7.
   # The "text max" shape proven on 8081: nvfp4 KV, no vision, no prefix
   # reuse. Structured probe 327 tok/s @ 68%. Context 249856, not 258048:
   # the 258048 fit had ~40 MB of margin and baseline VRAM drift (voice
@@ -658,7 +696,7 @@ models:
       - [--draft-tokens, 7]
       - --rope-yarn
 
-last_profile: qwen3.8-27b-tensorfold-129
+last_profile: daisyrose-27b-tensorfold-129
 last_systemone: h2o-lightning-4b
 last_ocr: paddleocr
 last_vision: liquid-450m
