@@ -201,71 +201,20 @@ models:
       - [--top-k, 0]
       - [--min-p, 0.0]
 
-  # mari hotkey i — Inkling 2 Mini on Strata's native .strata v1.1 SQ-10 pack
-  # (strata-inkling shape engine 0.1.65, Strata 0.2.19; github.com/Niko1221/
-  # Strata/releases/tag/v0.2.19 + huggingface.co/strata-engine/
-  # Inkling-2-Mini-Strata), NOT llama.cpp. 26.4B MoE / 3.4B active (5.4B
-  # looped across 48 visits), embedded W=4 Markov-Beam-Tree DSpark drafter
-  # ("drafting": "dspark"), 0.64 GB lossless BF16 Vision shard on the GPU
-  # (1024 image tokens). SQ-10 = 10.47 GB, 92.35% top-1 vs the original —
-  # and per the model card the FASTEST pack on a 5090. Measured 2026-11-22 on
-  # this box, primary CUDA backend: 162-194 tok/s decode, vision verified.
-  # 262144 ctx fp16 KV fits (fp16 fine here — SQ-20 needs fp8). Params =
-  # setup.sh output + model-card sampling (see the sq20 notes). Runs the
-  # HOUSE-PATCHED engine (TRAP 2 below): prefill back on the tensor-core fast
-  # path with a VRAM-aware gate. ex: i ran
-  # ~/inference.mjs inkling-2-mini-ud-q4-dspark (unsloth llama.cpp
-  # fork: 229376 ctx, kept launchable below).
-  #
-  # TRAP 1 (cost a whole debugging session): NEVER pass --vram-reserve-mib,
-  # --cpu-threads, --gpus 2 or --kv k8v8|k8v4 to the inkling engine —
-  # make_default_backend() (engine/src/inkling2/ink_backend.h) then picks the
-  # modular EP/hybrid backend instead of the primary fused CUDA one: 2-10
-  # tok/s instead of 140-162, and it segfaults (at 0x900 in gemm_sk_q8_1) on
-  # any prompt where one expert collects >64 tokens (host_jobs evals a null
-  # host desc for VRAM-resident experts; ep_dual_gpu.cu dispatch_moe_ep).
-  # The qwen-engine --vram-reserve-mib 996 voice hand-tune does NOT apply
-  # here (fp8/fp16 KV and the primary backend leave >4 GB free anyway).
-  #
-  # TRAP 2 (found via a stuck `I` at "reading the prompt: 14,336 of 15,686"):
-  # the tensor-core prefill path (ink_runner.cuh run_visit mode 0, M>=128)
-  # sizes scratch in ensure_pf_attn(K_len) at ~112 KB per PROMPT token,
-  # realloc'd as the prompt grows, and dalloc exit()s on OOM — which deadlocks
-  # on a stdio lock and leaves the server window hung on a corpse. The
-  # fallback gate only tests "480 MB free", so prompts past free-VRAM / 112 KB
-  # died mid-prefill (~14K tokens on SQ-20, ~88K on SQ-10).
-  # FIX: both jsons now run the HOUSE-PATCHED engine
-  # ~/.config/inference/bin/strata-inkling (built 2026-11-22 from the 0.1.65
-  # tree; gate now checks the real scratch size vs free VRAM and falls back to
-  # the streaming path when it does not fit — safe at any prompt length) with
-  # --chunk 512 back. Rebuild after engine updates:
-  #   cd /workspace/tmp/strata/engine && cmake -S src/inkling2 \
-  #     -B build-inkling-local -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  #     -DSTRATA_ENABLE_CUDA=1 -DSTRATA_INK_CUDA_ARCHS=120 \
-  #   && cmake --build build-inkling-local --target strata-inkling -j 32 \
-  #   && cp build-inkling-local/strata-inkling ~/.config/inference/bin/
-  # (re-apply the house patch in ink_runner.cuh if the tree moves: search
-  # "House patch 2026-11-22"). The run-config `exe` points at the patched
-  # binary instead of component:strata-inkling for both packs.
-  # Rebuild: cd /workspace/tmp/strata && ./setup.sh --setup --family
-  #   inkling-2-mini --model SQ-10 --context 262144 --vision gpu
-  #   --no-browser --yes --no-start  (then strip --vram-reserve-mib from the
-  #   json if setup was passed one)
-  # Run config (GITIGNORED upstream): terminal/strata-inkling-2-mini-sq-10.json
-  inkling-2-mini-strata-sq10:
-    server_bin: /workspace/tmp/strata/terminal/.venv/bin/strata-serve
-    server_process: strata-serve
-    context_window: 262144
-    artifact: ~/.config/inference/strata-serve.py
-    args:
-      - [--config, /workspace/tmp/strata/terminal/strata-inkling-2-mini-sq-10.json]
-      - [--port, 1234]
-      - --fit-max-tokens
-
-  # mari hotkey I — Inkling 2 Mini on Strata's SQ-20 pack: bit-exact
+  # mari hotkey i — Inkling 2 Mini on Strata's SQ-20 pack: bit-exact
   # LOSSLESS native SF4+MX8 (19.35 GB / 18.02 GiB, 100.00% top-1, 0.00000
-  # KLD) + same DSpark/Vision. Quality above the llama fork's UD-Q4_K_XL
-  # (98.0%). Params are setup.sh's own output + the model card — NOT the qwen
+  # KLD; strata-inkling shape engine 0.1.65, Strata 0.2.19) + embedded W=4
+  # Markov-Beam-Tree DSpark drafter ("drafting": "dspark") + the 0.64 GB
+  # lossless BF16 Vision shard on the GPU (1024 image tokens). 26.4B MoE /
+  # 3.4B active (5.4B looped across 48 visits), 262144 ctx. Quality above
+  # the llama fork's UD-Q4_K_XL (98.0%). Chosen over SQ-10 (10.47 GB,
+  # 92.35% top-1, faster raw decode): SQ-10 seemed to get lost easily in
+  # long generations. (SQ-10 stays installed in the strata checkout —
+  # terminal/strata-inkling-2-mini-sq-10.json — its inference preset was
+  # dropped 2026-11-22.) ex: i ran ~/inference.mjs
+  # inkling-2-mini-ud-q4-dspark (unsloth llama.cpp fork: 229376 ctx, kept
+  # launchable below).
+  # Params are setup.sh's own output + the model card — NOT the qwen
   # profiles (that mistake gave us TRAP 1). Deviations, both measured:
   #   --kv fp8     fp16 KV at 262144 OOMs this 32 GB card at load
   #                (ink_cuda.cuh:54). Stays on the primary backend (only
@@ -290,6 +239,40 @@ models:
   #               (generate_batched's documented hand-back) = ~156 tok/s on
   #               forward_batch numerics — a DIFFERENT greedy trajectory
   #               (explains "same prompt, different poem" between runs).
+  #
+  # TRAP 1 (cost a whole debugging session): NEVER pass --vram-reserve-mib,
+  # --cpu-threads, --gpus 2 or --kv k8v8|k8v4 to the inkling engine —
+  # make_default_backend() (engine/src/inkling2/ink_backend.h) then picks the
+  # modular EP/hybrid backend instead of the primary fused CUDA one: 2-10
+  # tok/s instead of 140-162, and it segfaults (at 0x900 in gemm_sk_q8_1) on
+  # any prompt where one expert collects >64 tokens (host_jobs evals a null
+  # host desc for VRAM-resident experts; ep_dual_gpu.cu dispatch_moe_ep).
+  # The qwen-engine --vram-reserve-mib 996 voice hand-tune does NOT apply
+  # here (fp8/fp16 KV and the primary backend leave >4 GB free anyway).
+  #
+  # TRAP 2 (found via a stuck prefill at "reading the prompt: 14,336 of
+  # 15,686"): the tensor-core prefill path (ink_runner.cuh run_visit mode 0,
+  # M>=128) sizes scratch in ensure_pf_attn(K_len) at ~112 KB per PROMPT
+  # token, realloc'd as the prompt grows, and dalloc exit()s on OOM — which
+  # deadlocks on a stdio lock and leaves the server window hung on a corpse.
+  # The fallback gate only tests "480 MB free", so prompts past free-VRAM /
+  # 112 KB died mid-prefill (~14K tokens on SQ-20, ~88K on SQ-10).
+  # FIX: the json runs the HOUSE-PATCHED engine ~/.config/inference/bin/
+  # strata-inkling (0.1.65 + our 4 patches: the scratch VRAM gate, the
+  # cross-turn prompt cache, long-period loop detection, RESUME reporting —
+  # committed on branch inkling-fixes-0.1.65 in /workspace/tmp/strata, PR
+  # Niko1221/Strata#6707). After strata updates, rebase that branch and
+  # rebuild:
+  #   cd /workspace/tmp/strata && git fetch && \
+  #     git rebase origin/main inkling-fixes-0.1.65 && \
+  #   cd engine && cmake --build build-inkling-local --target strata-inkling -j 32 && \
+  #     cp build-inkling-local/strata-inkling ~/.config/inference/bin/
+  # The run-config `exe` points at the patched binary instead of
+  # component:strata-inkling. Model reinstall if ever needed:
+  #   cd /workspace/tmp/strata && ./setup.sh --setup --family
+  #   inkling-2-mini --model SQ-20 --context 262144 --vision gpu
+  #   --no-browser --yes --no-start  (then strip --vram-reserve-mib from the
+  #   json if setup was passed one)
   # House patches (engine code, not params): the prefill-scratch VRAM gate
   #               (TRAP 2 — upstream exit()-deadlocks mid-prefill otherwise;
   #               prefill 7,090 ppts at 11.5K, 4,064 at 76.8K, no stalls) and
@@ -307,7 +290,6 @@ models:
   #               field). One parked conversation per slot (kParkSlots 4).
   # DSpark A/B (2026-11-22): decode 122 vs 128 tok/s short ctx, 95 vs 139 at
   #               11.5K (beam +46%; repetition-heavy prompts draft best).
-  # Rebuild the house engine after strata updates: see TRAP 2 notes.
   # Run config (GITIGNORED upstream): terminal/strata-inkling-2-mini-sq-20.json
   inkling-2-mini-strata-sq20:
     server_bin: /workspace/tmp/strata/terminal/.venv/bin/strata-serve
