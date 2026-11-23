@@ -29,14 +29,16 @@ import json
 import sys
 from pathlib import Path
 
-# Strata checkout: holds the serve/ package, the engine binary and the venv.
+# Strata checkout: holds the terminal/ package (serve/, setup.py, .venv, engine)
+# since the 0.2.16 layout, the engine binaries and the run configs.
 STRATA_ROOT = Path("/workspace/tmp/strata")
+TERMINAL_ROOT = STRATA_ROOT / "terminal"
 # Same script_dir as config.yaml, so the derived config sits with the launcher
 # scripts rather than in STRATA_ROOT (setup.py globs strata-*.json there and
 # would offer a derived file as an installed model).
 SCRIPT_DIR = Path.home() / ".cache" / "inference"
 
-sys.path.insert(0, str(STRATA_ROOT))
+sys.path.insert(0, str(TERMINAL_ROOT))
 
 argv = sys.argv[1:]
 alias, out = None, []

@@ -27,7 +27,7 @@
             "text",
             "image"
           ],
-          "contextWindow": 262144,
+          "contextWindow": 524288,
           "maxTokens": 32000,
           "thinkingLevelMap": {
             "off": "off",
@@ -102,6 +102,79 @@
             "supportsReasoningEffort": true,
             "supportsDeveloperRole": true,
             "supportsUsageInStreaming": true
+          }
+        }
+      ]
+    },
+    "xiaomi": {
+      "baseUrl": "https://token-plan-sgp.xiaomimimo.com/v1",
+      "apiKey": "tp-s3x9kvy9zszt46ezykzud3m4ug537wdyhzls0002axh6jtui",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "mimo-v2.6-pro",
+          "name": "MiMo 2.6 Pro",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 131072,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high"
+          },
+          "compat": {
+            "supportsReasoningEffort": true
+          }
+        },
+        {
+          "id": "mimo-v2.6-flash",
+          "name": "MiMo 2.6 Flash",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 131072,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high"
+          },
+          "compat": {
+            "supportsReasoningEffort": true
+          }
+        },
+        {
+          "id": "mimo-v2.6-pro-ultraspeed",
+          "name": "MiMo 2.6 Pro UltraSpeed",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 131072,
+          "thinkingLevelMap": {
+            "off": "none",
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high"
+          },
+          "compat": {
+            "supportsReasoningEffort": true
           }
         }
       ]

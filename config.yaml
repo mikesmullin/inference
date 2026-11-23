@@ -155,6 +155,170 @@ models:
       - [--flash-attn, "on"]
       - [--load-mode, none]
 
+  # ex mari hotkey i (i now runs inkling-2-mini-strata-sq20 below; 2026-11-22) —
+  # Inkling 2 Mini (Thinking Machines Lab, 26.4B MoE / 5.4B active,
+  # looped layers 6-17 x3) via Unsloth llama.cpp fork b12588-mix-c0c3de8
+  # (looped-layer + per-expert NVFP4 + DSpark support; upstream only gained
+  # Inkling in #32694, after the local v1.0.0 b1b770d build). UD-Q4_K_XL
+  # (17.63 GB, 98.0% top-1 vs Q8 ref) + DSpark Q8_0 block drafter (0.40 GB,
+  # block size 8, --spec-draft-n-max clamped to 7) + F16 mmproj. Native 1M ctx
+  # does NOT fit on 32 GB: measured 2026-11-20, the 1M ctx buffers alone want
+  # 49.3 GB (51.7e9 B / 1048576 tok ~= 49 KB/tok — KV materialized for all 48
+  # layer-evals, core 6-17 x3 each keeping its own KV, so the SWA windowing
+  # doesn't save VRAM at allocation time). 17.4 GiB weights+draft+mmproj +
+  # ~11 GB KV at 229376 + compute ~= 31 GB loaded (~1.4 GB free steady-state,
+  # verified serving). If startup OOMs, drop mmproj first, then -c 196608,
+  # then -b/-ub. Sampling per model card (temp 1.0/top-p 1.0/
+  # top-k 0/min-p 0.0). Do NOT switch to draft-mtp; do NOT set -devd
+  # (drafter borrows target embeddings).
+  inkling-2-mini-ud-q4-dspark:
+    server_bin: /workspace/models/runtimes/llama.cpp-inkling-b12588/llama.cpp/llama-server
+    context_window: 229376
+    model: /workspace/models/Inkling-2-Mini-GGUF/Inkling-2-Mini-UD-Q4_K_XL.gguf
+    mmproj: /workspace/models/Inkling-2-Mini-GGUF/mmproj-F16.gguf
+    draft: /workspace/models/Inkling-2-Mini-GGUF/dspark-Inkling-2-Mini-Q8_0.gguf
+    args:
+      - [--spec-type, draft-dspark]
+      - [--spec-draft-n-max, 3]
+      - [-ngl, 99]
+      - [-ngld, 99]
+      - [-c, 229376]
+      - [-ctk, q4_0]
+      - [-ctv, q4_0]
+      - [-b, 1024]
+      - [-ub, 256]
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - --jinja
+      - [--reasoning-effort, low]
+      - --kv-unified
+      - [-t, 12]
+      - [-np, 1]
+      - [--flash-attn, "on"]
+      - [--load-mode, none]
+      - [--temp, 1.0]
+      - [--top-p, 1.0]
+      - [--top-k, 0]
+      - [--min-p, 0.0]
+
+  # mari hotkey i — Inkling 2 Mini on Strata's native .strata v1.1 SQ-10 pack
+  # (strata-inkling shape engine 0.1.65, Strata 0.2.19; github.com/Niko1221/
+  # Strata/releases/tag/v0.2.19 + huggingface.co/strata-engine/
+  # Inkling-2-Mini-Strata), NOT llama.cpp. 26.4B MoE / 3.4B active (5.4B
+  # looped across 48 visits), embedded W=4 Markov-Beam-Tree DSpark drafter
+  # ("drafting": "dspark"), 0.64 GB lossless BF16 Vision shard on the GPU
+  # (1024 image tokens). SQ-10 = 10.47 GB, 92.35% top-1 vs the original —
+  # and per the model card the FASTEST pack on a 5090. Measured 2026-11-22 on
+  # this box, primary CUDA backend: 162-194 tok/s decode, vision verified.
+  # 262144 ctx fp16 KV fits (fp16 fine here — SQ-20 needs fp8). Params =
+  # setup.sh output + model-card sampling (see the sq20 notes). Runs the
+  # HOUSE-PATCHED engine (TRAP 2 below): prefill back on the tensor-core fast
+  # path with a VRAM-aware gate. ex: i ran
+  # ~/inference.mjs inkling-2-mini-ud-q4-dspark (unsloth llama.cpp
+  # fork: 229376 ctx, kept launchable below).
+  #
+  # TRAP 1 (cost a whole debugging session): NEVER pass --vram-reserve-mib,
+  # --cpu-threads, --gpus 2 or --kv k8v8|k8v4 to the inkling engine —
+  # make_default_backend() (engine/src/inkling2/ink_backend.h) then picks the
+  # modular EP/hybrid backend instead of the primary fused CUDA one: 2-10
+  # tok/s instead of 140-162, and it segfaults (at 0x900 in gemm_sk_q8_1) on
+  # any prompt where one expert collects >64 tokens (host_jobs evals a null
+  # host desc for VRAM-resident experts; ep_dual_gpu.cu dispatch_moe_ep).
+  # The qwen-engine --vram-reserve-mib 996 voice hand-tune does NOT apply
+  # here (fp8/fp16 KV and the primary backend leave >4 GB free anyway).
+  #
+  # TRAP 2 (found via a stuck `I` at "reading the prompt: 14,336 of 15,686"):
+  # the tensor-core prefill path (ink_runner.cuh run_visit mode 0, M>=128)
+  # sizes scratch in ensure_pf_attn(K_len) at ~112 KB per PROMPT token,
+  # realloc'd as the prompt grows, and dalloc exit()s on OOM — which deadlocks
+  # on a stdio lock and leaves the server window hung on a corpse. The
+  # fallback gate only tests "480 MB free", so prompts past free-VRAM / 112 KB
+  # died mid-prefill (~14K tokens on SQ-20, ~88K on SQ-10).
+  # FIX: both jsons now run the HOUSE-PATCHED engine
+  # ~/.config/inference/bin/strata-inkling (built 2026-11-22 from the 0.1.65
+  # tree; gate now checks the real scratch size vs free VRAM and falls back to
+  # the streaming path when it does not fit — safe at any prompt length) with
+  # --chunk 512 back. Rebuild after engine updates:
+  #   cd /workspace/tmp/strata/engine && cmake -S src/inkling2 \
+  #     -B build-inkling-local -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  #     -DSTRATA_ENABLE_CUDA=1 -DSTRATA_INK_CUDA_ARCHS=120 \
+  #   && cmake --build build-inkling-local --target strata-inkling -j 32 \
+  #   && cp build-inkling-local/strata-inkling ~/.config/inference/bin/
+  # (re-apply the house patch in ink_runner.cuh if the tree moves: search
+  # "House patch 2026-11-22"). The run-config `exe` points at the patched
+  # binary instead of component:strata-inkling for both packs.
+  # Rebuild: cd /workspace/tmp/strata && ./setup.sh --setup --family
+  #   inkling-2-mini --model SQ-10 --context 262144 --vision gpu
+  #   --no-browser --yes --no-start  (then strip --vram-reserve-mib from the
+  #   json if setup was passed one)
+  # Run config (GITIGNORED upstream): terminal/strata-inkling-2-mini-sq-10.json
+  inkling-2-mini-strata-sq10:
+    server_bin: /workspace/tmp/strata/terminal/.venv/bin/strata-serve
+    server_process: strata-serve
+    context_window: 262144
+    artifact: ~/.config/inference/strata-serve.py
+    args:
+      - [--config, /workspace/tmp/strata/terminal/strata-inkling-2-mini-sq-10.json]
+      - [--port, 1234]
+      - --fit-max-tokens
+
+  # mari hotkey I — Inkling 2 Mini on Strata's SQ-20 pack: bit-exact
+  # LOSSLESS native SF4+MX8 (19.35 GB / 18.02 GiB, 100.00% top-1, 0.00000
+  # KLD) + same DSpark/Vision. Quality above the llama fork's UD-Q4_K_XL
+  # (98.0%). Params are setup.sh's own output + the model card — NOT the qwen
+  # profiles (that mistake gave us TRAP 1). Deviations, both measured:
+  #   --kv fp8     fp16 KV at 262144 OOMs this 32 GB card at load
+  #                (ink_cuda.cuh:54). Stays on the primary backend (only
+  #                k8v8/k8v4 retrigger TRAP 1). Engine settles ~30 GB.
+  #   exe: house-patched 0.1.65 binary (TRAP 2 + the prompt cache, below).
+  # sampling: GREEDY + BEAM BY CHOICE (2026-11-22 decision, after A/B): the
+  #               engine default temperature 0 engages the fused W=4 beam
+  #               (236 tok/s solo vs ~93-114 with card sampling). Greedy
+  #               degenerates long prose (templatic repetition) and the solo
+  #               beam hard-locks into exact ~200-token cycles — GUARDED by
+  #               the house-patched detect_repetition_loop (periods <=512,
+  #               3 exact repeats at long periods; verified: trips the real
+  #               pi poem at 65% through instead of running to abort; no
+  #               false positives on healthy 2000-token poems). For long
+  #               creative prose, add the model card's Recommended settings
+  #               back to the json: "sampling": {"temperature": 1.0,
+  #               "top_p": 1.0, "min_p": 0.0} (the block's validator refuses
+  #               top_k 0; default 64 is close) — ~93-114 tok/s, no loops.
+  #               NOTE (two decode paths): solo/alone = fused beam 236 tok/s;
+  #               concurrent with other requests (live agent traffic) the
+  #               request is stopped and continues in a batch slot
+  #               (generate_batched's documented hand-back) = ~156 tok/s on
+  #               forward_batch numerics — a DIFFERENT greedy trajectory
+  #               (explains "same prompt, different poem" between runs).
+  # House patches (engine code, not params): the prefill-scratch VRAM gate
+  #               (TRAP 2 — upstream exit()-deadlocks mid-prefill otherwise;
+  #               prefill 7,090 ppts at 11.5K, 4,064 at 76.8K, no stalls) and
+  #               the CROSS-TURN PROMPT CACHE: at prefill end the engine parks
+  #               the prompt-end state in buffers of its own (ink_runner.cuh
+  #               park_swa_ring: the slot's SWA ring + scales ~130 MB;
+  #               ink_cuda_backend.cu d_sconv_park_: the ShortConv) so the
+  #               DSpark beam keeps the speculative snapshot to itself. The
+  #               ring must be parked: its slack only survives ~512 tail
+  #               tokens (verified: 1,200-token reply, then a probe of the
+  #               prompt's tail answered exactly). Measured: 11.5K turn1 5,601
+  #               ppts / 138 tok/s decode; follow-ups cached 11464/11479,
+  #               0.03-0.16 s prefill, 137-147 tok/s. usage.cached_tokens via
+  #               the server.py house patch (the solo DONE line lacks the
+  #               field). One parked conversation per slot (kParkSlots 4).
+  # DSpark A/B (2026-11-22): decode 122 vs 128 tok/s short ctx, 95 vs 139 at
+  #               11.5K (beam +46%; repetition-heavy prompts draft best).
+  # Rebuild the house engine after strata updates: see TRAP 2 notes.
+  # Run config (GITIGNORED upstream): terminal/strata-inkling-2-mini-sq-20.json
+  inkling-2-mini-strata-sq20:
+    server_bin: /workspace/tmp/strata/terminal/.venv/bin/strata-serve
+    server_process: strata-serve
+    context_window: 262144
+    artifact: ~/.config/inference/strata-serve.py
+    args:
+      - [--config, /workspace/tmp/strata/terminal/strata-inkling-2-mini-sq-20.json]
+      - [--port, 1234]
+      - --fit-max-tokens
+
   # mari hotkey d — DaisyRose-27B on official TensorFold 1.2.9
   # (validated 2026-11-19). This is the configuration that actually works on
   # this box:
@@ -486,7 +650,7 @@ models:
   #   cd /workspace/tmp/strata && ./setup.sh --setup --family qwen \
   #     --model IQ3_XXS --context 131072 --kv int8 --vision cpu \
   #     --port 1234 --yes --no-start --build
-  #   then put --vram-reserve-mib back to 996 in strata-iq3_xxs.json
+  #   then put --vram-reserve-mib back to 996 in terminal/strata-iq3_xxs.json
   #
   # Pass every flag explicitly. A bare `--setup --yes` infers its answers from
   # whichever strata-*.json was touched last (installed_configs() sorts by
@@ -525,12 +689,12 @@ models:
   # without the pool the engine still runs, just slower on expert streams.
   # Backups: /tmp/strata-iq3_xxs.131k-backup.json, /tmp/calib-262k-q4.out.
   qwen3.8-flash-next-strata-iq3xxs:
-    server_bin: /workspace/tmp/strata/.venv/bin/strata-serve
+    server_bin: /workspace/tmp/strata/terminal/.venv/bin/strata-serve
     server_process: strata-serve
     context_window: 262144
     artifact: ~/.config/inference/strata-serve.py
     args:
-      - [--config, /workspace/tmp/strata/strata-iq3_xxs.json]
+      - [--config, /workspace/tmp/strata/terminal/strata-iq3_xxs.json]
       - [--host, 127.0.0.1]
       - [--port, 1234]
       # Clamp max_tokens to the context left instead of rejecting with 400
@@ -547,12 +711,12 @@ models:
   # If the server log warns that the experts leave under ~6 GB for everything
   # else, or the box starts swapping, come back to -iq3xxs.
   qwen3.8-flash-next-strata-iq3s:
-    server_bin: /workspace/tmp/strata/.venv/bin/strata-serve
+    server_bin: /workspace/tmp/strata/terminal/.venv/bin/strata-serve
     server_process: strata-serve
     context_window: 131072
     artifact: ~/.config/inference/strata-serve.py
     args:
-      - [--config, /workspace/tmp/strata/strata-iq3_s.json]
+      - [--config, /workspace/tmp/strata/terminal/strata-iq3_s.json]
       - [--host, 127.0.0.1]
       - [--port, 1234]
       - --fit-max-tokens
@@ -696,7 +860,7 @@ models:
       - [--draft-tokens, 7]
       - --rope-yarn
 
-last_profile: daisyrose-27b-tensorfold-129
+last_profile: ternary-bonsai-2-ninfer
 last_systemone: h2o-lightning-4b
 last_ocr: paddleocr
 last_vision: liquid-450m
