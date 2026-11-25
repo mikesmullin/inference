@@ -503,6 +503,50 @@ models:
       - [--draft-tokens, 5]
       - --vision
 
+  # mari hotkey B (uppercase) — Ternary Bonsai 2.5 27B (PrismML 2026-11-24)
+  # via stock llama.cpp v1.0.0 (b1b770d): Q2_0 runs on upstream from b11556,
+  # so no Prism fork needed for a first try. Same Qwen3.8-27B hybrid-arch +
+  # 1.76-bit ternary format as Bonsai 2, retrained for agentic coding /
+  # multi-turn tool use (SWE-bench Verified 60.8 -> 75.6, Terminal-Bench
+  # 52.8 -> 60.1, AppWorld 51.2 -> 90.5 at the same 5.9 GB footprint).
+  # Files via `hf download` in /workspace/models/Ternary-Bonsai-2.5-27B-GGUF/:
+  # Q2_0-mtp (7.9 GB, built-in MTP draft head) + mmproj-Q8_0 vision.
+  # MTP flags from presets/llama.cpp/mtp-cuda.json (5090 group: n-max 3,
+  # p-min 0.1); sampling per model card thinking mode (temp 1.0/top-p 0.95/
+  # top-k 20/min-p 0). No --reasoning-effort flag -> template default xhigh
+  # (most accurate); low is unsupported and behaves like xhigh.
+  # NInfer path (matching `b` speed) needs a 2.5 conversion + 2.5 MTP/DFlash2
+  # heads (only Bonsai-2 heads exist today) — revisit if this proves useful.
+  ternary-bonsai-2.5-q2-mtp:
+    server_bin: /workspace/tmp/llama.cpp-1.0.0/build/bin/llama-server
+    server_process: llama-server
+    context_window: 262144
+    model: /workspace/models/Ternary-Bonsai-2.5-27B-GGUF/Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf
+    mmproj: /workspace/models/Ternary-Bonsai-2.5-27B-GGUF/Ternary-Bonsai-2.5-27B-mmproj-Q8_0.gguf
+    args:
+      - [--spec-type, draft-mtp]
+      - [--spec-draft-n-min, 0]
+      - [--spec-draft-n-max, 3]
+      - [--spec-draft-p-min, 0.1]
+      - [-ngl, 99]
+      - [-c, 262144]
+      - [-ctk, q4_0]
+      - [-ctv, q4_0]
+      - [-b, 2048]
+      - [-ub, 512]
+      - [--host, 127.0.0.1]
+      - [--port, 1234]
+      - --jinja
+      - --kv-unified
+      - [-t, 12]
+      - [-np, 1]
+      - [--flash-attn, "on"]
+      - [--load-mode, none]
+      - [--temp, 1.0]
+      - [--top-p, 0.95]
+      - [--top-k, 20]
+      - [--min-p, 0.0]
+
   # ex mari hotkey q (d now runs daisyrose-27b-tensorfold-129) — Qwen3.8-27B NVFP4 via
   # upstream ninfer, DFlash2 K=7.
   # The "text max" shape proven on 8081: nvfp4 KV, no vision, no prefix
@@ -842,7 +886,7 @@ models:
       - [--draft-tokens, 7]
       - --rope-yarn
 
-last_profile: ternary-bonsai-2-ninfer
+last_profile: ternary-bonsai-2.5-q2-mtp
 last_systemone: h2o-lightning-4b
 last_ocr: paddleocr
 last_vision: liquid-450m

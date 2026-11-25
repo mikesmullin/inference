@@ -27,7 +27,7 @@
             "text",
             "image"
           ],
-          "contextWindow": 524288,
+          "contextWindow": 262144,
           "maxTokens": 32000,
           "thinkingLevelMap": {
             "off": "off",
@@ -116,7 +116,8 @@
           "name": "MiMo 2.6 Pro",
           "reasoning": true,
           "input": [
-            "text"
+            "text",
+            "image"
           ],
           "contextWindow": 1048576,
           "maxTokens": 131072,
@@ -138,7 +139,8 @@
           "name": "MiMo 2.6 Flash",
           "reasoning": true,
           "input": [
-            "text"
+            "text",
+            "image"
           ],
           "contextWindow": 1048576,
           "maxTokens": 131072,
@@ -160,7 +162,8 @@
           "name": "MiMo 2.6 Pro UltraSpeed",
           "reasoning": true,
           "input": [
-            "text"
+            "text",
+            "image"
           ],
           "contextWindow": 1048576,
           "maxTokens": 131072,
